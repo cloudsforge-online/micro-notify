@@ -1,0 +1,47 @@
+{
+  "name": "@cloudsforge/notify",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The platform-wide notification service: event to notification mapping, preferences, templates, dedupe, digests, retries, delivery history, operator broadcasts, and developer webhooks as one pipeline.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node --import tsx src/index.ts",
+    "migrate": "node --import tsx src/migrator.ts",
+    "typecheck": "tsc --noEmit",
+    "_test": "--test-concurrency=1 is required, not a preference: the database test files truncate this service's tables between cases, and node:test runs FILES in parallel by default. A TRUNCATE takes an AccessExclusiveLock, so one file's reset deadlocks against another file's inserts (40P01). Cases within a file already run in order.",
+    "test": "node --import tsx --test --test-concurrency=1 src/*.test.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "_runtimeDependencies": [
+    "Siblings are consumed as link: rather than file:. A file: path PACKS the directory and honours",
+    "'files': ['dist'], which installs a package whose exports point at src/index.ts while src/ was",
+    "never copied — the import then fails at runtime with a module-not-found that names a path",
+    "inside node_modules. link: symlinks the working tree, so the unbuilt TypeScript sources these",
+    "packages currently export actually resolve.",
+    "nodemailer is a runtime dependency and is imported LAZILY, only once SMTP_HOST is set. An",
+    "unconfigured transport is a supported mode (see src/email.ts), so the module must not be",
+    "needed to boot a deployment that sends no mail."
+  ],
+  "dependencies": {
+    "@cloudsforge/auth": "link:../runtime/packages/auth",
+    "@cloudsforge/contracts-events": "link:../contracts/packages/events",
+    "@cloudsforge/db": "link:../runtime/packages/db",
+    "@cloudsforge/http": "link:../runtime/packages/http",
+    "@cloudsforge/jobs": "link:../runtime/packages/jobs",
+    "@cloudsforge/lifecycle": "link:../runtime/packages/lifecycle",
+    "@cloudsforge/telemetry": "link:../runtime/packages/telemetry",
+    "nodemailer": "^6.9.16",
+    "postgres": "^3.4.5",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/nodemailer": "^6.4.17",
+    "jose": "^5.9.6",
+    "typescript": "^5.7.2"
+  }
+}
