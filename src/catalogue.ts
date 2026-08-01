@@ -711,6 +711,20 @@ export const MAPPED_TOPICS: readonly string[] = Object.freeze(Object.keys(RULES)
 export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.freeze({
   'identity.user.deleted':
     'Erasure, not news. Handled by the pipeline as a deletion of everything this service holds for the user — see ERASURE_TOPICS. Sending a notification to an account being erased would be both useless and a data-retention problem.',
+  // ── aetherholm, the first game in the registry ─────────────────────────────────────────────
+  // None of its five topics notifies YET, and each reason below is a decision rather than a
+  // deferral. When the game's notification design lands (attacks incoming, aegis expiring —
+  // events that do not exist in phase 1), those will arrive as NEW topics with rules.
+  'aetherholm.season.opened':
+    'A world event with no individual subject. Announcing a season is product marketing, not a notification; a broadcast through /admin/broadcasts is the honest channel if one is wanted.',
+  'aetherholm.city.founded':
+    'The user themselves just did it, in the client, and is looking at the city they founded. Confirming a thing the person watched happen is noise that trains them to ignore this channel.',
+  'aetherholm.building.completed':
+    'Phase-1 queues are minutes long and the player is usually present; a per-completion ping would be the worst noise source in the estate. A digest-eligible completion notification is a later, deliberate decision once real queue lengths exist.',
+  'aetherholm.research.completed':
+    'Same reasoning as building.completed: present-player noise now, a possible digest entry later, decided with data rather than by default.',
+  'aetherholm.skerry.provisioned':
+    'The provision is requested from worlds and its outcome surfaces in the worlds provisions screen the buyer is already on. If provisioning ever becomes slow enough to leave, a completion notification becomes worth its interruption and gets a rule.',
   'ledger.reconciliation.completed':
     'Custody total against indexer-observed total. It concerns operators and freezes withdrawals; no individual user is its subject.',
 })
