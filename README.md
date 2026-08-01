@@ -21,17 +21,20 @@ Read out of `src/server.ts`. Every path is served under both `/v1` and the bare 
 | `POST` | `/notifications/:id/read` | user | Marks one read (`src/server.ts:333`) |
 | `GET` | `/preferences` | user, or an admin reading another's | Per-category channel and digest settings (`src/server.ts:355`) |
 | `PUT` | `/preferences` | user | Replaces them (`src/server.ts:385`) |
-| `POST` | `/ingest` | **service only**, ingest scope | The event bus inbox (`src/server.ts:409`) |
+| `POST` | `/ingest` | **HMAC signature only** — no bearer is read | The event bus inbox (`src/server.ts:409`). The signature over the raw bytes is the authentication; it used to also demand a service token with the ingest scope, which no outbox relay in the estate presents, so the event bus itself was refused by the route built to receive it |
 | `POST` | `/admin/broadcasts` | operator | Sends to a cohort (`src/server.ts:482`) |
 | `GET` | `/admin/deliveries` | operator | Delivery attempts, for answering "did it arrive" (`src/server.ts:533`) |
 | `GET` | `/livez` `/readyz` `/metrics` | unauthenticated | `src/server.ts:268`, `:279`, `:287` |
 
-**Every route above except the three probes calls `authenticate()`.** There is no route a browser
-may call anonymously, and none that a service may call without a scope.
+**Every route above except the three probes and `/ingest` calls `authenticate()`.** No route is
+open to an anonymous browser: the feed and preference routes demand a token, and `/ingest` demands
+something stronger — the outbox signing secret, proved over the exact bytes received.
 
 `POST /ingest` is the only way a notification is created. There is no "send me a notification"
 route, deliberately: a notification is a consequence of something that happened elsewhere, and a
 service that could be asked to invent one directly would let any caller forge a security alert.
+A signed-in person still cannot reach it — not because a token is refused, but because a person
+does not hold the outbox signing secret, and no token of any kind is read.
 
 ## Background work
 

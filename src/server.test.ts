@@ -361,18 +361,26 @@ function signed(body: string): Record<string, string> {
   }
 }
 
-test('ingest requires a service token, not a user one', async () => {
-  const rig = await start(USER)
-  const body = JSON.stringify(registeredEvent('custody.key.exported', ALICE, { user_id: ALICE }))
-  const response = await fetch(`${rig.url}/ingest`, { method: 'POST', headers: signed(body), body })
-  assert.equal(response.status, 403)
-})
-
-test('ingest requires the ingest scope', async () => {
-  const rig = await start(UNSCOPED)
-  const body = JSON.stringify(registeredEvent('custody.key.exported', ALICE, { user_id: ALICE }))
-  const response = await fetch(`${rig.url}/ingest`, { method: 'POST', headers: signed(body), body })
-  assert.equal(response.status, 403)
+test('a signed delivery lands whatever token rides along, because the MAC is the gate', async () => {
+  // These two tests used to demand a service token and the ingest scope — a demand no producer
+  // in the estate could meet, since every outbox relay sends the signature and NO bearer. The
+  // route the event bus exists to call refused the event bus. The property that mattered — a
+  // signed-in person cannot mint notifications — holds stronger now: a person does not hold the
+  // outbox signing secret, and no token of any kind is read.
+  // The envelope carries version 9.0 so the request stops at the door with a 202 — this suite
+  // never reaches the pipeline (that is pipeline.test.ts, against a real database). What is under
+  // test is that it got PAST authentication: the old code 403'd both riders before reading a byte.
+  for (const rider of [USER, UNSCOPED]) {
+    const rig = await start(rider)
+    const body = JSON.stringify({
+      ...registeredEvent('custody.key.exported', ALICE, { user_id: ALICE }),
+      version: '9.0',
+    })
+    const response = await fetch(`${rig.url}/ingest`, { method: 'POST', headers: signed(body), body })
+    assert.equal(response.status, 202, 'the signature authenticates; the bearer is not consulted')
+    const answer = (await response.json()) as { accepted: boolean; reason: string }
+    assert.equal(answer.reason, 'unreadable_version', 'stopped at the version gate, past the auth one')
+  }
 })
 
 test('ingest refuses an unsigned body even with a valid service token', async () => {

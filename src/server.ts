@@ -409,11 +409,16 @@ function buildRoutes(): Route[] {
       method: 'POST',
       path: '/ingest',
       handle: async (ctx, deps) => {
-        const principal = await authenticate(ctx, deps)
-        // A user token must never reach this route. Ingest mints notifications on behalf of other
-        // services; a signed-in person is not one.
-        if (principal.kind !== 'service') throw new ForbiddenError(INGEST_SCOPE)
-        requireScope(principal, INGEST_SCOPE)
+        // THE SIGNATURE IS THE AUTHENTICATION — the same repair as micro-activity's inbox, for
+        // the same structural reason. This handler used to authenticate a bearer and demand
+        // `notify:ingest`, and no producer could ever present one: every outbox relay in the
+        // estate sends the HMAC signature and NO Authorization header (see identity's
+        // `outbox.ts` deliver()) — a relay is a background job with no bearer and no way to mint
+        // one. So every event bound for a person's notifications died 401 at this line, always.
+        // The MAC over the raw bytes is a shared-secret proof over exactly what was sent, which
+        // a bearer is not; a signed-in person still cannot reach this route, because a person
+        // does not hold the outbox signing secret. `trade` and `worlds` shaped their inboxes
+        // this way from the start.
 
         // Raw bytes, because the signature is over exactly what was sent.
         const raw = await readRaw(ctx.req)
