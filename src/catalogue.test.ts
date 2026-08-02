@@ -18,6 +18,7 @@ import {
 } from './catalogue.ts'
 import { CATEGORIES, PRIORITIES, isCategory, isPriority } from './model.ts'
 import { TEMPLATES, isTemplateId, templateFor } from './templates.ts'
+import { UNPRODUCED_NOTIFICATIONS } from './topics.ts'
 import { registeredEvent, unregisteredEvent, ALICE, BOB } from './testsupport.ts'
 
 test('every topic in the registry is either mapped or explicitly not notifying', () => {
@@ -36,15 +37,26 @@ test('every non-notifying topic records why', () => {
   }
 })
 
-test('every event AD-08 names has a rule', () => {
-  // The list from AD-08 and the notify epic, spelled as topics. Each entry is one of the
-  // twenty-one kinds of notification this service exists to make real.
-  const required = [
+/**
+ * AD-08's notifications, and the one thing this test used to get wrong.
+ *
+ * It listed twenty-eight TOPICS and asserted a rule for each. Eleven of those topic names were
+ * guesses at events that no producer emits, so eleven of its assertions passed against rules that
+ * could never fire — the test was the reason nobody noticed, because it reported full AD-08
+ * coverage while the notifications behind it were unreachable.
+ *
+ * AD-08 names KINDS of notification, not topics. So each requirement is now either a live rule on
+ * a registered topic, or a recorded gap in `topics.ts` carrying the topic its producer really
+ * emits. Both halves are checked, and a requirement that is in neither fails.
+ */
+test('every notification AD-08 names is either live or a recorded gap', () => {
+  const live = [
     // new-device sign-in — two producers, one fact
     'identity.session.created',
     'identity.device.added',
-    // password or MFA change
-    'identity.password.changed',
+    // password change — carried by the revocation, which is what identity actually emits
+    'identity.session.revoked',
+    // MFA change, both halves
     'identity.mfa.removed',
     'identity.mfa.added',
     // wallet created
@@ -52,23 +64,14 @@ test('every event AD-08 names has a rule', () => {
     // key exported
     'custody.export.requested',
     'custody.key.exported',
-    // deposit detected / confirmed
-    'wallet.deposit.detected',
+    // deposit confirmed
     'wallet.deposit.confirmed',
-    // withdrawal requested / completed / failed
+    // withdrawal requested / completed / late
     'wallet.withdrawal.requested',
     'settlement.withdrawal.completed',
     'settlement.withdrawal.stuck',
-    'settlement.transaction.failed',
-    // trading-bot event
-    'trade.bot.triggered',
-    'trade.bot.stopped',
-    // risk limit reached
-    'policy.limit.reached',
-    // marketplace sale / offer / auction
+    // marketplace sale
     'market.listing.sold',
-    'market.offer.received',
-    'market.auction.ended',
     // token deployment
     'mint.deploy.confirmed',
     // game reward
@@ -77,16 +80,30 @@ test('every event AD-08 names has a rule', () => {
     'community.proposal.opened',
     'community.proposal.executed',
     'community.vote.cast',
-    // API-key event
-    'devplatform.apikey.created',
-    'devplatform.apikey.revoked',
-    // service incident
-    'admin_api.incident.opened',
   ]
-  for (const topic of required) {
+  for (const topic of live) {
     assert.ok(ruleFor(topic), `AD-08 requires a rule for ${topic}`)
   }
-  assert.ok(MAPPED_TOPICS.length >= required.length)
+
+  // The rest of AD-08's list, each with no event to hang a rule on. The record names the producer
+  // and what it emits instead; `topics.test.ts` checks the evidence and fails when one becomes
+  // registrable. Naming them here keeps the requirement visible from the coverage test rather
+  // than only from the deletion's commit message.
+  const recorded = new Set(UNPRODUCED_NOTIFICATIONS.map((gap) => gap.requirement))
+  for (const requirement of [
+    'risk limit reached',
+    'deposit detected, before confirmation',
+    'withdrawal transaction failed outright',
+    'trading-bot event',
+    'marketplace offer received',
+    'auction ended',
+    'API key created',
+    'API key revoked',
+    'service incident',
+  ]) {
+    assert.ok(recorded.has(requirement), `AD-08 names "${requirement}" and nothing here accounts for it`)
+  }
+  assert.ok(MAPPED_TOPICS.length >= live.length)
 })
 
 test('exactly the events 04-domain-model §10.3 names are critical', () => {
@@ -97,8 +114,8 @@ test('exactly the events 04-domain-model §10.3 names are critical', () => {
     'identity.device.added',
     'identity.mfa.added',
     'identity.mfa.removed',
-    'identity.password.changed',
     'identity.session.created',
+    'identity.session.revoked',
     'wallet.withdrawal.requested',
   ])
 })
@@ -264,8 +281,11 @@ test('a dedupe key never contains the event id for a fact that two events can de
 
 test('every template is reachable from some rule, or is a platform template', () => {
   const used = new Set<string>(Object.values(RULES).map((rule) => rule.templateId))
-  // These three are produced by the service itself rather than by an event.
-  const platform = new Set(['system.broadcast', 'digest.summary'])
+  // Produced by the service itself rather than by an event. `system.incident` joined them when
+  // the admin_api.incident.opened rule was deleted: an incident reaches users as an operator
+  // broadcast (POST /admin/broadcasts names a template id, pipeline.ts:555), which is the path
+  // that was actually carrying it — the deleted rule was a no-op that never routed anything.
+  const platform = new Set(['system.broadcast', 'digest.summary', 'system.incident'])
   for (const id of Object.keys(TEMPLATES)) {
     assert.ok(used.has(id) || platform.has(id), `${id} is written but nothing renders it`)
   }

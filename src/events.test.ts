@@ -17,6 +17,21 @@ import { ALICE, registeredEvent, unregisteredEvent } from './testsupport.ts'
 
 const known = isKnownTopic
 
+/**
+ * The predicate as it is when a rule is ahead of the registry.
+ *
+ * `isKnownTopic` maps no unregistered topic today — `topics.ts` now forbids a rule for one unless
+ * it is quarantined with the spec that will register it, and the quarantine is empty. That state
+ * is correct and it must not make the lag path untested: it is what accepts a delivery in the
+ * window between a rule landing and contracts adopting the topic, and it is the difference
+ * between a first-consumer deployment working and refusing every event.
+ *
+ * So these tests supply the predicate explicitly, which is exactly why `readInboundEvent` takes it
+ * as a parameter rather than importing the catalogue.
+ */
+const knownWhileUnregistered = (topic: string) =>
+  isKnownTopic(topic) || topic === 'identity.password.changed' || topic === 'admin_api.incident.opened'
+
 test('the registry-lag error string this service keys on is still the one the package emits', () => {
   const envelope = unregisteredEvent('identity.password.changed', ALICE, { user_id: ALICE })
   const verdict = validateEnvelope(envelope)
@@ -36,7 +51,7 @@ test('a registered topic is accepted without a lag flag', () => {
 
 test('an unregistered topic this service maps is accepted, and flagged', () => {
   const event = unregisteredEvent('identity.password.changed', ALICE, { user_id: ALICE })
-  const read = readInboundEvent(event, known)
+  const read = readInboundEvent(event, knownWhileUnregistered)
   assert.equal(read.ok, true)
   if (!read.ok) return
   assert.equal(read.registryLag, true)
@@ -55,7 +70,7 @@ test('an unregistered topic with anything ELSE wrong is rejected', () => {
     ...unregisteredEvent('identity.password.changed', ALICE, { user_id: ALICE }),
     actor: 'user:',
   }
-  const read = readInboundEvent(event, known)
+  const read = readInboundEvent(event, knownWhileUnregistered)
   assert.equal(read.ok, false)
   if (read.ok) return
   assert.equal(read.kind, 'malformed')
@@ -68,7 +83,7 @@ test('a producer publishing under another service namespace is rejected', () => 
   const event = unregisteredEvent('identity.password.changed', ALICE, { user_id: ALICE }, {
     producer: 'market',
   })
-  const read = readInboundEvent(event, known)
+  const read = readInboundEvent(event, knownWhileUnregistered)
   assert.equal(read.ok, false)
   if (read.ok) return
   assert.match(read.errors.join(' '), /does not own topic/)
@@ -80,8 +95,22 @@ test('a hyphenated producer name matches its underscored topic segment', () => {
   const event = unregisteredEvent('admin_api.incident.opened', 'incident-1', { title: 'Degraded' }, {
     producer: 'admin-api',
   })
-  const read = readInboundEvent(event, known)
+  const read = readInboundEvent(event, knownWhileUnregistered)
   assert.equal(read.ok, true)
+})
+
+test('a topic this service holds no rule for is refused, however well formed', () => {
+  // The runtime half of the guard in topics.ts. Every rule now names a registered topic, so the
+  // eleven names that used to be accepted here — each one a notification that could never fire —
+  // are refused at the door instead of being stored under a rule that does nothing.
+  for (const topic of ['identity.password.changed', 'trade.bot.triggered', 'admin_api.incident.opened']) {
+    const service = topic.split('.')[0] ?? ''
+    const event = unregisteredEvent(topic, ALICE, { user_id: ALICE }, {
+      producer: service === 'admin_api' ? 'admin-api' : service,
+    })
+    const read = readInboundEvent(event, known)
+    assert.equal(read.ok, false, `${topic} has no rule and must not be accepted`)
+  }
 })
 
 test('a major version this build cannot read is unreadable_version, not malformed', () => {

@@ -499,15 +499,49 @@ describe('pipeline', { skip }, () => {
 
   /* ---------------------------------------------------------------- registry lag, erasure, broadcast */
 
-  test('an event on a topic the registry has not minted still notifies', async () => {
+  /**
+   * This used to ingest `identity.password.changed` and assert a "password was changed" subject.
+   * It passed, and the notification it proved could never happen: identity emits no such topic. It
+   * revokes every session with a reason (identity/src/server.ts:960), which is the event below.
+   */
+  test('a password change reaches the user as the session revocation identity really emits', async () => {
+    const rig = testRig(sql)
+    const outcome = await ingestEvent(
+      rig.deps,
+      registeredEvent('identity.session.revoked', 'session-1', {
+        sessionId: 'session-1',
+        userId: ALICE,
+        reason: 'password_changed',
+      }),
+    )
+    assert.equal(outcome.kind, 'processed')
+    await dispatchDue(rig.deps, 50)
+    assert.match(rig.adapters.in_app.sent[0]?.message.subject ?? '', /session .* was ended/i)
+    assert.match(rig.adapters.in_app.sent[0]?.message.body ?? '', /your password was changed/)
+  })
+
+  test('an ordinary sign-out is not news, and is recorded as such', async () => {
+    const rig = testRig(sql)
+    const outcome = await ingestEvent(
+      rig.deps,
+      registeredEvent('identity.session.revoked', 'session-2', {
+        sessionId: 'session-2',
+        userId: ALICE,
+        reason: 'signed_out',
+      }),
+    )
+    // `not_applicable`, never `no_recipient`: the rule found the user and decided, which is the
+    // distinction an operator reads to know whether a producer needs fixing.
+    assert.deepEqual(outcome, { kind: 'ignored', reason: 'not_applicable' })
+  })
+
+  test('an event on a topic no rule covers is ignored rather than stored as a notification', async () => {
     const rig = testRig(sql)
     const outcome = await ingestEvent(
       rig.deps,
       unregisteredEvent('identity.password.changed', ALICE, { user_id: ALICE }),
     )
-    assert.equal(outcome.kind, 'processed')
-    await dispatchDue(rig.deps, 50)
-    assert.match(rig.adapters.in_app.sent[0]?.message.subject ?? '', /password was changed/)
+    assert.deepEqual(outcome, { kind: 'ignored', reason: 'no_rule' })
   })
 
   test('identity.user.deleted erases everything this service holds', async () => {

@@ -85,8 +85,10 @@ test('an unknown locale falls back rather than failing', () => {
 test('the security templates say what to do, not just what happened', () => {
   // Wording is a design decision here, not decoration: a notification that reports a fact the
   // user cannot act on has told them nothing useful at the moment they most need help.
-  for (const id of ['security.new_device', 'security.password_changed', 'security.key_exported'] as const) {
+  // `security.session_revoked` replaced `security.password_changed`, whose rule named a topic no
+  // producer emits: identity revokes the sessions and says why rather than announcing the change.
+  for (const id of ['security.new_device', 'security.session_revoked', 'security.key_exported'] as const) {
     const body = TEMPLATES[id].text['en-GB'].body
-    assert.match(body, /If this was not you/, `${id} does not tell the user what to do`)
+    assert.match(body, /If (this|that) was not you/, `${id} does not tell the user what to do`)
   }
 })

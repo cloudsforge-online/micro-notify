@@ -128,6 +128,21 @@ function userIdOf(event: InboundEvent): string | null {
   return null
 }
 
+/**
+ * identity's revocation reasons, in words a person can act on.
+ *
+ * The producer's vocabulary, not a guess: `identity/src/server.ts:960`, `:1032`, `:1095`, `:1104`
+ * and `identity/src/sessions.ts:366`. An unrecognised reason falls back to a sentence that is
+ * still true, because a new reason arriving from a newer identity must not blank the notification
+ * — and the fallback is deliberately vague rather than wrong.
+ */
+const REVOCATION_REASONS: Readonly<Record<string, string>> = Object.freeze({
+  password_changed: 'your password was changed',
+  password_reset: 'your password was reset',
+  signed_out_everywhere: 'you signed out everywhere',
+  signed_out: 'you signed out',
+})
+
 /** `2026-07-30 04:12 UTC`. Deterministic on purpose: `Intl` output varies by ICU build. */
 export function formatInstant(iso: string): string {
   const at = new Date(iso)
@@ -205,14 +220,42 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
-  'identity.password.changed': Object.freeze({
+  /**
+   * A password change, an admin revocation, and the burn that follows a stolen refresh token.
+   *
+   * This replaces a rule on `identity.password.changed` — a topic **no producer has ever
+   * emitted**. identity does not announce a password change as its own fact; it revokes every
+   * session and says why, at `identity/src/server.ts:960` (`password_changed`), `:1032`
+   * (`password_reset`), `:1095` (`signed_out_everywhere`) and `:1104` (`signed_out`). So the §10.3
+   * password-change notification was written against a name that does not exist, and this is the
+   * event that actually carries the fact.
+   *
+   * An ordinary sign-out is deliberately NOT news: the user just did it, in this application, and
+   * confirming it is how a security channel is trained into background noise. Everything else is —
+   * a revocation the user did not perform is the visible half of an account takeover.
+   *
+   * NOTE for whoever wires the producer: `emitSessionRevoked` (identity/src/sessions.ts:390) has
+   * no caller. `revokeSession` and `revokeAllSessions` update the rows without emitting, so this
+   * rule is correct and silent until identity calls it from those two functions.
+   */
+  'identity.session.revoked': Object.freeze({
     category: 'security',
     priority: 'critical',
-    templateId: 'security.password_changed',
-    why: 'A password change the user did not make is an account takeover already in progress.',
+    templateId: 'security.session_revoked',
+    why: 'A session ended by somebody other than the user is an account takeover in progress, and the password-change case is 04-domain-model §10.3 word for word.',
     recipients: forUser(
-      (event) => `security.password_changed:${event.id}`,
-      (event) => ({ at: formatInstant(event.occurredAt) }),
+      // Keyed on the session: one revocation, one notification, however often it is redelivered.
+      // "Sign out everywhere" revokes many sessions and produces one notification per session,
+      // which is correct — each is a device losing access — and the dedupe key says so.
+      (event) => `security.session_revoked:${str(event.payload, ['session_id', 'sessionId'], event.key)}`,
+      (event) => ({
+        reason: REVOCATION_REASONS[str(event.payload, ['reason'], '')] ?? 'it was revoked',
+        at: formatInstant(event.occurredAt),
+      }),
+      (event) => `cf:identity:session:${str(event.payload, ['session_id', 'sessionId'], event.key)}`,
+      // The one reason that is not news. Every other value — including one this build has never
+      // seen — notifies, because an unrecognised reason is exactly when the user should look.
+      (event) => str(event.payload, ['reason'], '') !== 'signed_out',
     ),
   }),
 
@@ -322,20 +365,6 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
 
   /* --------------------------------------------------------- security · high */
 
-  'policy.limit.reached': Object.freeze({
-    category: 'security',
-    priority: 'high',
-    templateId: 'security.risk_limit_reached',
-    why: 'A limit that fires without telling the user produces a support ticket that says "it just did not work".',
-    recipients: forUser(
-      (event) => `security.risk_limit_reached:${str(event.payload, ['limit', 'limit_name', 'limitName'], 'limit')}:${str(event.payload, ['window', 'period'], event.occurredAt.slice(0, 13))}`,
-      (event) => ({
-        limit: str(event.payload, ['limit', 'limit_name', 'limitName'], 'risk'),
-        action: str(event.payload, ['action'], 'an action'),
-        at: formatInstant(event.occurredAt),
-      }),
-    ),
-  }),
 
   /* --------------------------------------------------------- account and wallet */
 
@@ -368,22 +397,6 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
 
   /* --------------------------------------------------------- money */
 
-  'wallet.deposit.detected': Object.freeze({
-    category: 'deposit',
-    priority: 'normal',
-    templateId: 'deposit.detected',
-    why: 'Users currently learn a deposit is coming by refreshing. Seen-but-not-yet-credited is the state that generates the support ticket.',
-    recipients: forUser(
-      (event) => `deposit.detected:${str(event.payload, ['tx_hash', 'txHash', 'deposit_id', 'depositId'], event.id)}`,
-      (event) => ({
-        amount: str(event.payload, ['amount'], 'a deposit'),
-        asset: str(event.payload, ['asset_code', 'assetCode', 'asset'], ''),
-        confirmations: str(event.payload, ['confirmations'], '0'),
-        required: str(event.payload, ['required_confirmations', 'requiredConfirmations'], 'the required number of'),
-      }),
-      (event) => `cf:wallet:deposit:${str(event.payload, ['deposit_id', 'depositId', 'tx_hash', 'txHash'], event.id)}`,
-    ),
-  }),
 
   'wallet.deposit.confirmed': Object.freeze({
     category: 'deposit',
@@ -433,21 +446,6 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
-  'settlement.transaction.failed': Object.freeze({
-    category: 'withdrawal',
-    priority: 'high',
-    templateId: 'withdrawal.failed',
-    why: 'A transaction that failed outright, as opposed to one that is merely late.',
-    recipients: forUser(
-      (event) => `withdrawal.failed:${str(event.payload, ['withdrawal_id', 'withdrawalId', 'transaction_id', 'transactionId'], event.id)}`,
-      (event) => ({
-        amount: str(event.payload, ['amount'], 'a transaction'),
-        asset: str(event.payload, ['asset_code', 'assetCode', 'asset'], ''),
-        reason: str(event.payload, ['reason', 'error'], 'the network rejected it'),
-      }),
-      (event) => `cf:settlement:transaction:${str(event.payload, ['transaction_id', 'transactionId'], event.id)}`,
-    ),
-  }),
 
   'ledger.entry.posted': Object.freeze({
     category: 'transfer',
@@ -469,37 +467,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
 
   /* --------------------------------------------------------- products */
 
-  'trade.bot.triggered': Object.freeze({
-    category: 'trading',
-    priority: 'high',
-    templateId: 'trading.bot_event',
-    why: 'A bot acting on money without telling its owner is the single most common cause of "I did not authorise that trade".',
-    recipients: forUser(
-      (event) => `trading.bot_event:${str(event.payload, ['bot_id', 'botId'], event.key)}:${str(event.payload, ['event', 'trigger'], event.id)}`,
-      (event) => ({
-        botName: str(event.payload, ['bot_name', 'botName'], 'your bot'),
-        event: str(event.payload, ['event', 'trigger'], 'triggered'),
-        detail: str(event.payload, ['detail', 'reason'], 'Open the bot to see the full order history.'),
-      }),
-      (event) => `cf:trade:bot:${str(event.payload, ['bot_id', 'botId'], event.key)}`,
-    ),
-  }),
 
-  'trade.bot.stopped': Object.freeze({
-    category: 'trading',
-    priority: 'high',
-    templateId: 'trading.bot_event',
-    why: 'A bot that stopped is a bot no longer managing a position the user believes is managed.',
-    recipients: forUser(
-      (event) => `trading.bot_event:${str(event.payload, ['bot_id', 'botId'], event.key)}:stopped`,
-      (event) => ({
-        botName: str(event.payload, ['bot_name', 'botName'], 'your bot'),
-        event: 'stopped',
-        detail: str(event.payload, ['reason', 'detail'], 'It is no longer managing its position.'),
-      }),
-      (event) => `cf:trade:bot:${str(event.payload, ['bot_id', 'botId'], event.key)}`,
-    ),
-  }),
 
   'market.listing.sold': Object.freeze({
     category: 'market',
@@ -517,38 +485,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
-  'market.offer.received': Object.freeze({
-    category: 'market',
-    priority: 'normal',
-    templateId: 'market.offer',
-    why: 'Offers expire. An offer the seller never saw is a sale that did not happen.',
-    recipients: forUser(
-      (event) => `market.offer:${str(event.payload, ['offer_id', 'offerId'], event.id)}`,
-      (event) => ({
-        itemName: str(event.payload, ['item_name', 'itemName', 'title'], 'your listing'),
-        amount: str(event.payload, ['amount', 'price'], ''),
-        asset: str(event.payload, ['asset_code', 'assetCode', 'asset'], ''),
-      }),
-      (event) => `cf:market:offer:${str(event.payload, ['offer_id', 'offerId'], event.id)}`,
-    ),
-  }),
 
-  'market.auction.ended': Object.freeze({
-    category: 'market',
-    priority: 'normal',
-    templateId: 'market.auction',
-    why: 'An auction status change is time-bound information: outbid, ending soon, ended.',
-    recipients: forUser(
-      (event) => `market.auction:${str(event.payload, ['auction_id', 'auctionId'], event.key)}:${str(event.payload, ['status'], 'ended')}`,
-      (event) => ({
-        itemName: str(event.payload, ['item_name', 'itemName', 'title'], 'an item'),
-        status: str(event.payload, ['status'], 'ended'),
-        amount: str(event.payload, ['amount', 'price', 'highest_bid', 'highestBid'], ''),
-        asset: str(event.payload, ['asset_code', 'assetCode', 'asset'], ''),
-      }),
-      (event) => `cf:market:auction:${str(event.payload, ['auction_id', 'auctionId'], event.key)}`,
-    ),
-  }),
 
   'mint.deploy.confirmed': Object.freeze({
     category: 'token',
@@ -653,37 +590,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
-  'devplatform.apikey.created': Object.freeze({
-    category: 'api',
-    priority: 'high',
-    templateId: 'api.key_event',
-    why: 'An API key acts as the user. One created by somebody else is a persistent credential nobody sees in a session list.',
-    recipients: forUser(
-      (event) => `api.key_event:${str(event.payload, ['key_id', 'keyId'], event.id)}:created`,
-      (event) => ({
-        keyLabel: str(event.payload, ['label', 'key_label', 'keyLabel'], 'an unnamed key'),
-        event: 'created',
-        at: formatInstant(event.occurredAt),
-      }),
-      (event) => `cf:devplatform:apikey:${str(event.payload, ['key_id', 'keyId'], event.id)}`,
-    ),
-  }),
 
-  'devplatform.apikey.revoked': Object.freeze({
-    category: 'api',
-    priority: 'high',
-    templateId: 'api.key_event',
-    why: 'A revocation the owner did not make means someone is locking them out of their own integration.',
-    recipients: forUser(
-      (event) => `api.key_event:${str(event.payload, ['key_id', 'keyId'], event.id)}:revoked`,
-      (event) => ({
-        keyLabel: str(event.payload, ['label', 'key_label', 'keyLabel'], 'an unnamed key'),
-        event: 'revoked',
-        at: formatInstant(event.occurredAt),
-      }),
-      (event) => `cf:devplatform:apikey:${str(event.payload, ['key_id', 'keyId'], event.id)}`,
-    ),
-  }),
 
   'billing.entitlement.granted': Object.freeze({
     category: 'billing',
@@ -774,16 +681,6 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
 
   /* --------------------------------------------------------- platform */
 
-  'admin_api.incident.opened': Object.freeze({
-    category: 'system',
-    priority: 'high',
-    templateId: 'system.incident',
-    why: 'An incident that reaches users before they reach support. The status page is the other half; this is the push.',
-    // An incident concerns everybody, so it takes the broadcast fan-out path rather than naming a
-    // user here — the same machinery an operator uses at POST /admin/broadcasts, which is one
-    // fan-out rather than two. `pipeline.ts` recognises this rule's category and routes it there.
-    recipients: (): RecipientSet => ({ kind: 'none', reason: 'not_applicable' }),
-  }),
 } satisfies Readonly<Record<string, Rule>>)
 
 /**

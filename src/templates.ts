@@ -64,14 +64,22 @@ export const TEMPLATES = Object.freeze({
       'A new device signed in to your account at {{at}}.\n\nDevice: {{device}}\nApproximate location: {{ipPrefix}}\n\nIf this was not you, sign out everywhere and change your password now.',
     ),
   }),
-  'security.password_changed': Object.freeze({
-    id: 'security.password_changed',
+  /**
+   * Replaces `security.password_changed`, whose rule was keyed to a topic nobody emits.
+   *
+   * identity does not announce a password change as its own fact — it revokes the sessions and
+   * says why — so the sentence is built around the revocation and names the reason. It has to work
+   * for all of them: a password change, a reset, an admin revocation, and the family burn that
+   * follows a replayed refresh token.
+   */
+  'security.session_revoked': Object.freeze({
+    id: 'security.session_revoked',
     category: 'security',
-    params: ['at'],
-    path: '/settings/security',
+    params: ['reason', 'at'],
+    path: '/settings/security/sessions',
     text: en(
-      'Your password was changed',
-      'Your account password was changed at {{at}}.\n\nIf this was not you, your account may be compromised. Reset your password and contact support immediately.',
+      'A session on your CloudsForge account was ended',
+      'A session was signed out at {{at}} because {{reason}}.\n\nIf that was not you, someone else may hold your password: reset it and sign out everywhere now.',
     ),
   }),
   'security.mfa_changed': Object.freeze({
@@ -104,16 +112,6 @@ export const TEMPLATES = Object.freeze({
       'The private key for {{walletLabel}} was exported at {{at}}. That wallet is self-custodied from now on: CloudsForge can no longer protect, recover or freeze it.\n\nIf this was not you, treat every asset in that wallet as compromised and move it immediately.',
     ),
   }),
-  'security.risk_limit_reached': Object.freeze({
-    id: 'security.risk_limit_reached',
-    category: 'security',
-    params: ['limit', 'action', 'at'],
-    path: '/settings/security',
-    text: en(
-      'A security limit was reached on your account',
-      'The {{limit}} limit was reached at {{at}} while attempting {{action}}. The action was held for review.\n\nIf you did not attempt it, change your password and review your devices.',
-    ),
-  }),
 
   /* ------------------------------------------------------------------ account and wallet */
 
@@ -137,16 +135,6 @@ export const TEMPLATES = Object.freeze({
 
   /* ------------------------------------------------------------------ money */
 
-  'deposit.detected': Object.freeze({
-    id: 'deposit.detected',
-    category: 'deposit',
-    params: ['amount', 'asset', 'confirmations', 'required'],
-    path: '/wallet/activity',
-    text: en(
-      'A deposit is on its way',
-      'We can see {{amount}} {{asset}} arriving. It has {{confirmations}} of the {{required}} confirmations it needs before it is credited.',
-    ),
-  }),
   'deposit.confirmed': Object.freeze({
     id: 'deposit.confirmed',
     category: 'deposit',
@@ -202,39 +190,12 @@ export const TEMPLATES = Object.freeze({
 
   /* ------------------------------------------------------------------ products */
 
-  'trading.bot_event': Object.freeze({
-    id: 'trading.bot_event',
-    category: 'trading',
-    params: ['botName', 'event', 'detail'],
-    path: '/trading/bots',
-    text: en('Your trading bot {{botName}} {{event}}', '{{botName}} {{event}}.\n\n{{detail}}'),
-  }),
   'market.sale': Object.freeze({
     id: 'market.sale',
     category: 'market',
     params: ['itemName', 'amount', 'asset'],
     path: '/market/sales',
     text: en('Your listing sold', '{{itemName}} sold for {{amount}} {{asset}}.'),
-  }),
-  'market.offer': Object.freeze({
-    id: 'market.offer',
-    category: 'market',
-    params: ['itemName', 'amount', 'asset'],
-    path: '/market/offers',
-    text: en(
-      'You have an offer',
-      'Someone offered {{amount}} {{asset}} for {{itemName}}. Offers expire, so have a look when you can.',
-    ),
-  }),
-  'market.auction': Object.freeze({
-    id: 'market.auction',
-    category: 'market',
-    params: ['itemName', 'status', 'amount', 'asset'],
-    path: '/market/auctions',
-    text: en(
-      'Auction update: {{itemName}}',
-      'The auction for {{itemName}} is now {{status}}. Current price: {{amount}} {{asset}}.',
-    ),
   }),
   'token.deployed': Object.freeze({
     id: 'token.deployed',
@@ -283,16 +244,6 @@ export const TEMPLATES = Object.freeze({
     text: en(
       'Your vote was recorded',
       'Your vote of {{choice}} on "{{proposalTitle}}" in {{communityName}} was recorded with a weight of {{weight}}.',
-    ),
-  }),
-  'api.key_event': Object.freeze({
-    id: 'api.key_event',
-    category: 'api',
-    params: ['keyLabel', 'event', 'at'],
-    path: '/developers/keys',
-    text: en(
-      'An API key on your account was {{event}}',
-      'The API key {{keyLabel}} was {{event}} at {{at}}.\n\nIf this was not you, revoke it now — an API key acts as you.',
     ),
   }),
   'billing.entitlement_granted': Object.freeze({

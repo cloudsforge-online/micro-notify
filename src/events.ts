@@ -9,17 +9,22 @@
  *
  * ## The one thing this file adds: tolerating a registry that lags
  *
- * AD-08 requires notify to map twenty-one kinds of event onto notifications. Twelve of them name
- * topics the frozen registry already holds. The rest — a password change, a wallet creation, a
- * deposit *detected* before confirmation, a bot event, a risk limit, an offer, an auction, a game
- * reward, a vote, an API-key event, a service incident — name topics that have not been minted
- * yet, because the services that will produce them are not written.
- *
  * `validateEnvelope` rejects an unregistered topic, and rightly: for most consumers a topic they
  * have never heard of is a bug. For notify it is a Tuesday. The fan-in is the entire bus, and
  * this service will always be the first consumer of a new topic. So a well-formed envelope on an
  * unregistered topic is accepted **only** when this service already holds a mapping rule for it,
  * and it is flagged so an operator can see the registry is behind.
+ *
+ * **This paragraph used to end differently, and the difference is the whole lesson.** It said the
+ * rules naming unregistered topics were waiting on "services that will produce them", and listed
+ * them: a password change, a deposit detected, a bot event, a risk limit, an offer, an auction, an
+ * API-key event, a service incident. Every one of those services was written, and every one of
+ * them emits a different name — so the tolerance stopped being a bridge to a registration and
+ * became cover for eleven rules that could not fire. The mechanism below is unchanged and still
+ * correct; what changed is that `topics.ts` now requires any rule using it to carry the spec that
+ * will register the topic, so the lag is a state something is checking rather than a state nobody
+ * can see. `knownTopic` is the same predicate it always was, and today it maps no unregistered
+ * topic at all.
  *
  * The acceptance is keyed on the registry's own error string, reproduced once below, and
  * `events.test.ts` asserts the package still produces exactly it. If the package rewords that
