@@ -52,13 +52,12 @@
  */
 
 import {
-  TOPICS,
   isRegisteredTopic,
   isValidTopicName,
   type TopicName,
   type TopicSpec,
 } from '@cloudsforge/contracts-events'
-import { MAPPED_TOPICS, NON_NOTIFYING_TOPICS, unmappedRegistryTopics } from './catalogue.ts'
+import { MAPPED_TOPICS, unmappedRegistryTopics } from './catalogue.ts'
 
 export interface ProposedTopic {
   /** Why notify holds a rule for a topic the estate has not named. Read by a human. */
@@ -224,14 +223,4 @@ export function staleGaps(): readonly string[] {
   )
     .map((gap) => gap.guessedTopic)
     .sort()
-}
-
-/** Every topic this service can act on: mapped, erased or deliberately silent. */
-export function knownTopicCount(): number {
-  return MAPPED_TOPICS.length + Object.keys(NON_NOTIFYING_TOPICS).length
-}
-
-/** The registry's own description of a mapped topic, for an operator listing coverage. */
-export function describeTopic(topic: string): string | null {
-  return isRegisteredTopic(topic) ? TOPICS[topic].description : null
 }
