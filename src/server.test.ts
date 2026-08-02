@@ -16,7 +16,7 @@ import type { AddressInfo } from 'node:net'
 import { signDelivery } from '@cloudsforge/contracts-events'
 import { Lifecycle } from '@cloudsforge/lifecycle'
 import { TokenError, VerifierUnavailableError, type Principal } from '@cloudsforge/auth'
-import { INGEST_SCOPE, READ_SCOPE, createServer, type ServerDeps } from './server.ts'
+import { READ_SCOPE, createServer, type ServerDeps } from './server.ts'
 import { SIGNATURE_HEADER } from './events.ts'
 import { registryOf } from './channels.ts'
 import type { Notification, NotifyStore } from './store.ts'
@@ -27,7 +27,7 @@ const INGEST_SECRET = 'K2sN4vQ8xR1wB6tY9zL3mF7hC5jD0pA4'
 
 const USER: Principal = { kind: 'user', userId: ALICE, handle: 'alice', roles: ['player'] }
 const ADMIN: Principal = { kind: 'user', userId: BOB, handle: 'root', roles: ['admin'] }
-const SERVICE: Principal = { kind: 'service', service: 'custody', scopes: [INGEST_SCOPE, READ_SCOPE] }
+const SERVICE: Principal = { kind: 'service', service: 'custody', scopes: [READ_SCOPE] }
 const UNSCOPED: Principal = { kind: 'service', service: 'market', scopes: [] }
 
 interface Harness {

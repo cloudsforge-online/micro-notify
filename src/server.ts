@@ -93,8 +93,15 @@ export interface ServerDeps {
   readonly now?: () => number
 }
 
-/** Scopes a service token must carry. */
-export const INGEST_SCOPE = 'notify:ingest'
+/**
+ * The scope a service token must carry to read on a user's behalf.
+ *
+ * There is deliberately no INGEST_SCOPE any more. The §3.3p repair made /ingest MAC-only — a
+ * relay is a background job with no bearer and no way to mint one — so `notify:ingest` was a
+ * scope no gate demanded and no token could ever usefully hold. A dead scope constant is worse
+ * than none: it reads as a capability, and registering it would have made identity able to mint
+ * a credential that opens nothing.
+ */
 export const READ_SCOPE = 'notify:read'
 
 /**
