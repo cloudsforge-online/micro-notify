@@ -216,6 +216,19 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
+  /*
+   * `remainingActive` leads the field list on both rules below, and that is the producer's
+   * spelling rather than a third guess.
+   *
+   * identity used to emit neither of these topics — it emitted `identity.mfa.changed`, which no
+   * registry declared and no consumer here classified, so both of these rules were unreachable
+   * for the whole life of the service. Now that it emits `identity.mfa.removed` and
+   * `identity.mfa.added` the payload has to be read with the names it actually carries, and
+   * identity calls this count `remainingActive` — the same word its `FactorRemoved` result and its
+   * `hasActiveFactor` query use. The older spellings stay in the list because a fallback that
+   * has never been wrong costs nothing, and because `str` needs a last resort anyway.
+   */
+
   'identity.mfa.removed': Object.freeze({
     category: 'security',
     priority: 'critical',
@@ -226,7 +239,14 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
       (event) => ({
         change: 'removed',
         at: formatInstant(event.occurredAt),
-        remainingFactors: str(event.payload, ['remaining_factors', 'remainingFactors'], flag(event.payload, ['was_last', 'wasLast']) ? '0' : 'unknown'),
+        remainingFactors: str(
+          event.payload,
+          ['remaining_active', 'remainingActive', 'remaining_factors', 'remainingFactors'],
+          // `wasLast` is the producer's flag for "this account now has no second factor". It is
+          // the honest zero, and it was previously spelled `change: 'last_factor_removed'` on a
+          // topic nothing subscribed to, so this fallback had never once fired either.
+          flag(event.payload, ['was_last', 'wasLast']) ? '0' : 'unknown',
+        ),
       }),
     ),
   }),
@@ -241,7 +261,11 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
       (event) => ({
         change: 'added',
         at: formatInstant(event.occurredAt),
-        remainingFactors: str(event.payload, ['remaining_factors', 'remainingFactors'], 'unknown'),
+        remainingFactors: str(
+          event.payload,
+          ['remaining_active', 'remainingActive', 'remaining_factors', 'remainingFactors'],
+          'unknown',
+        ),
       }),
     ),
   }),

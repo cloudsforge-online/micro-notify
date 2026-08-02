@@ -313,3 +313,93 @@ test('emberkin.reward.granted names the Shards and dedupes on the journal entry'
   assert.equal(set.recipients[0].params['rewardName'], '250 Shards')
 })
 
+
+/**
+ * **The MFA rules had never once been reachable.**
+ *
+ * identity emitted `identity.mfa.changed` — a name on no registry and in no consumer — carrying a
+ * four-value `change` discriminator. Both rules below were written against the topics the registry
+ * and this service agreed on, and no event ever arrived on either. The producer has been split into
+ * `identity.mfa.removed` and `identity.mfa.added`; these pin the payload contract so the two sides
+ * cannot drift apart again silently.
+ *
+ * `identity.mfa.added` is still unregistered, which is exactly the registry-lag case `events.ts`
+ * exists to tolerate: a rule for it is what makes the delivery acceptable, so it is built with
+ * `unregisteredEvent` rather than `registeredEvent`.
+ */
+test('a last-factor removal reports zero remaining, from the field identity actually sends', () => {
+  const event = registeredEvent('identity.mfa.removed', ALICE, {
+    userId: ALICE,
+    kind: 'totp',
+    factorId: 'factor-1',
+    wasLast: true,
+    remainingActive: 0,
+    critical: true,
+  })
+  const set = RULES['identity.mfa.removed']?.recipients(event)
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients[0].userId, ALICE)
+  assert.equal(set.recipients[0].dedupeKey, 'security.mfa_changed:factor-1')
+  assert.equal(set.recipients[0].params['change'], 'removed')
+  // Zero, not "unknown". The producer's field is `remainingActive`; reading only the older
+  // `remainingFactors` spelling would silently render the wrong sentence to someone whose account
+  // has just dropped to password-only.
+  assert.equal(set.recipients[0].params['remainingFactors'], '0')
+})
+
+test('an ordinary removal reports what is left rather than the last-factor zero', () => {
+  const event = registeredEvent('identity.mfa.removed', ALICE, {
+    userId: ALICE,
+    kind: 'totp',
+    factorId: 'factor-2',
+    wasLast: false,
+    remainingActive: 1,
+    critical: false,
+  })
+  const set = RULES['identity.mfa.removed']?.recipients(event)
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients[0].params['remainingFactors'], '1')
+})
+
+test('identity.mfa.added is reachable, and is the other half of the same template', () => {
+  const event = unregisteredEvent('identity.mfa.added', ALICE, {
+    userId: ALICE,
+    kind: 'recovery_code',
+    factorId: 'factor-3',
+    replacedPrevious: true,
+    remainingActive: 2,
+    critical: true,
+  })
+  const set = RULES['identity.mfa.added']?.recipients(event)
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients[0].userId, ALICE)
+  assert.equal(set.recipients[0].params['change'], 'added')
+  assert.equal(set.recipients[0].params['remainingFactors'], '2')
+  // Keyed on the factor, so an add and a remove of the SAME factor collapse into one notification
+  // while two different factors do not.
+  assert.equal(set.recipients[0].dedupeKey, 'security.mfa_changed:factor-3')
+})
+
+/**
+ * `identity.user.registered` is the first thing the platform ever says to someone, and identity
+ * never emitted it — the route wrote an `audit: 'user_registered'` log line instead, which is what
+ * every reader looking for the emit kept finding. The producer now emits it in the same
+ * transaction as the account; this pins the one field the greeting is built from.
+ */
+test('a registration greets the user by the handle identity sends, not by a display name', () => {
+  const event = registeredEvent('identity.user.registered', ALICE, {
+    userId: ALICE,
+    handle: 'sam',
+    organisationId: 'org-1',
+    organisationSlug: 'sam',
+  })
+  const set = RULES['identity.user.registered']?.recipients(event)
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients[0].userId, ALICE)
+  assert.equal(set.recipients[0].params['handle'], 'sam')
+  assert.equal(set.recipients[0].subjectUrn, `cf:identity:user:${ALICE}`)
+})
