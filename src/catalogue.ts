@@ -649,6 +649,66 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
+  /* --------------------------------------------------------- aetherholm */
+
+  'aetherholm.battle.resolved': Object.freeze({
+    category: 'ownership',
+    priority: 'high',
+    templateId: 'ownership.battle_report',
+    why: '"Your city was raided" is exactly what this channel exists for: it happened while the player was away, it cost them something, and the one action — look at the report, rebuild, retaliate — is theirs to take.',
+    // NOT forUser: its userIdOf falls back to the envelope ACTOR, and this event's actor is the
+    // ATTACKER (aetherholm/src/fleets.ts, `user:` actor on the emit). The payload names both
+    // sides; the recipient is the DEFENDER, read explicitly or not at all.
+    recipients: (event: InboundEvent): RecipientSet => {
+      const defender = str(event.payload, ['defender_user_id', 'defenderUserId'], '')
+      if (!defender) return { kind: 'none', reason: 'no_recipient' }
+      const battleId = str(event.payload, ['battle_id', 'battleId'], event.key)
+      return {
+        kind: 'recipients',
+        recipients: [
+          {
+            userId: defender,
+            params: {
+              cityName: str(event.payload, ['city_name', 'cityName'], 'your city'),
+              outcome: str(event.payload, ['outcome'], 'resolved'),
+              at: formatInstant(event.occurredAt),
+            },
+            // One battle, one notification — however many times the event is redelivered.
+            dedupeKey: `aetherholm.battle:${battleId}`,
+            subjectUrn: `cf:aetherholm:battle:${battleId}`,
+          },
+        ],
+      }
+    },
+  }),
+
+  'aetherholm.spire.captured': Object.freeze({
+    category: 'reward',
+    priority: 'normal',
+    templateId: 'reward.heraldry',
+    why: 'A 120-day campaign ended with this player on the objective, and the heraldry outlives the world it was won in. Once per season is the opposite of noise.',
+    // The producer carries every member of the holding alliance on the payload (the community
+    // events precedent, membersOf above): notify holds no membership table and must not guess.
+    recipients: (event: InboundEvent): RecipientSet => {
+      const raw = event.payload['user_ids'] ?? event.payload['userIds']
+      const ids = Array.isArray(raw)
+        ? raw.filter((id): id is string => typeof id === 'string' && id.length > 0)
+        : []
+      const seasonId = str(event.payload, ['season_id', 'seasonId'], event.id)
+      const islandId = str(event.payload, ['island_id', 'islandId'], event.key)
+      const params = { seasonName: str(event.payload, ['season_name', 'seasonName'], 'the season') }
+      const recipients = ids.map((userId) => ({
+        userId,
+        params,
+        dedupeKey: `aetherholm.spire:${seasonId}:${islandId}`,
+        subjectUrn: `cf:aetherholm:island:${islandId}`,
+      }))
+      const [first, ...rest] = recipients
+      if (!first) return { kind: 'none', reason: 'no_recipient' }
+      return { kind: 'recipients', recipients: [first, ...rest] }
+    },
+  }),
+
   /* --------------------------------------------------------- platform */
 
   'admin_api.incident.opened': Object.freeze({
@@ -712,9 +772,9 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
   'identity.user.deleted':
     'Erasure, not news. Handled by the pipeline as a deletion of everything this service holds for the user — see ERASURE_TOPICS. Sending a notification to an account being erased would be both useless and a data-retention problem.',
   // ── aetherholm, the first game in the registry ─────────────────────────────────────────────
-  // None of its five topics notifies YET, and each reason below is a decision rather than a
-  // deferral. When the game's notification design lands (attacks incoming, aegis expiring —
-  // events that do not exist in phase 1), those will arrive as NEW topics with rules.
+  // Phase 2 changed the answer for two topics: battle.resolved and spire.captured now have
+  // RULES above — the first game events worth an interruption. The phase-1 five below keep
+  // their reasons, each a decision rather than a deferral, and season.sealed joins them.
   'aetherholm.season.opened':
     'A world event with no individual subject. Announcing a season is product marketing, not a notification; a broadcast through /admin/broadcasts is the honest channel if one is wanted.',
   'aetherholm.city.founded':
@@ -725,6 +785,8 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
     'Same reasoning as building.completed: present-player noise now, a possible digest entry later, decided with data rather than by default.',
   'aetherholm.skerry.provisioned':
     'The provision is requested from worlds and its outcome surfaces in the worlds provisions screen the buyer is already on. If provisioning ever becomes slow enough to leave, a completion notification becomes worth its interruption and gets a rule.',
+  'aetherholm.season.sealed':
+    'A world event whose personal half already notifies: every victor hears through spire.captured, with the members carried on that payload. Telling every player their world ended is an announcement, not a notification — the broadcast channel is the honest one, and worlds consumes this event for heraldry entitlements, not people.',
   'ledger.reconciliation.completed':
     'Custody total against indexer-observed total. It concerns operators and freezes withdrawals; no individual user is its subject.',
 })

@@ -301,6 +301,29 @@ export const TEMPLATES = Object.freeze({
     ),
   }),
 
+  /* ------------------------------------------------------------------ aetherholm */
+
+  'ownership.battle_report': Object.freeze({
+    id: 'ownership.battle_report',
+    category: 'ownership',
+    params: ['cityName', 'outcome', 'at'],
+    path: '/aetherholm',
+    text: en(
+      'Your city {{cityName}} came under attack',
+      'Your city {{cityName}} came under attack at {{at}}.\n\nOutcome: {{outcome}}.\n\nThe full battle report — losses, loot and the wind of the approach — is waiting in Aetherholm.',
+    ),
+  }),
+  'reward.heraldry': Object.freeze({
+    id: 'reward.heraldry',
+    category: 'reward',
+    params: ['seasonName'],
+    path: '/aetherholm',
+    text: en(
+      'You held an Aether Spire as {{seasonName}} sealed',
+      '{{seasonName}} has sealed into the chronicle with your banner on an Aether Spire.\n\nHeraldry is yours: it will appear on your Worlds profile, visible in every title.',
+    ),
+  }),
+
   /* ------------------------------------------------------------------ platform */
 
   'system.incident': Object.freeze({

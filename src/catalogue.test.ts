@@ -18,7 +18,7 @@ import {
 } from './catalogue.ts'
 import { CATEGORIES, PRIORITIES, isCategory, isPriority } from './model.ts'
 import { TEMPLATES, isTemplateId, templateFor } from './templates.ts'
-import { registeredEvent, unregisteredEvent, ALICE } from './testsupport.ts'
+import { registeredEvent, unregisteredEvent, ALICE, BOB } from './testsupport.ts'
 
 test('every topic in the registry is either mapped or explicitly not notifying', () => {
   assert.deepEqual(
@@ -198,6 +198,55 @@ test('a deposit keyed by wallet_id is never attributed to the key as if it were 
   if (set?.kind !== 'recipients') return
   assert.equal(set.recipients[0].userId, ALICE)
   assert.notEqual(set.recipients[0].userId, 'wallet-1')
+})
+
+test('a battle report reaches the DEFENDER — never the raider, whoever the actor was', () => {
+  // aetherholm.battle.resolved is keyed by battle id and its envelope actor is the ATTACKER
+  // (aetherholm/src/fleets.ts, `user:` actor on the emit). forUser's actor fallback would hand
+  // "your city was raided" to the raider, so the rule reads defender_user_id explicitly.
+  const event = registeredEvent('aetherholm.battle.resolved', 'battle-1', {
+    attackerUserId: BOB,
+    defenderUserId: ALICE,
+    battleId: 'battle-1',
+    cityName: 'Aerie',
+    outcome: 'raided',
+  })
+  const set = RULES['aetherholm.battle.resolved']?.recipients(event)
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients.length, 1)
+  assert.equal(set.recipients[0].userId, ALICE)
+  assert.notEqual(set.recipients[0].userId, BOB)
+  assert.equal(set.recipients[0].dedupeKey, 'aetherholm.battle:battle-1')
+  // Without a defender the answer is no_recipient — a producer to fix, not a guess.
+  const anonymous = registeredEvent('aetherholm.battle.resolved', 'battle-2', { outcome: 'raided' })
+  assert.deepEqual(RULES['aetherholm.battle.resolved']?.recipients(anonymous), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
+})
+
+test('spire heraldry reaches every member the producer names, and nobody it guesses', () => {
+  const event = registeredEvent('aetherholm.spire.captured', 'island-1', {
+    seasonId: 'season-1',
+    seasonName: 'Season 1',
+    islandId: 'island-1',
+    userIds: [ALICE, BOB],
+  })
+  const set = RULES['aetherholm.spire.captured']?.recipients(event)
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.deepEqual(set.recipients.map((recipient) => recipient.userId).sort(), [ALICE, BOB].sort())
+  for (const recipient of set.recipients) {
+    assert.equal(recipient.dedupeKey, 'aetherholm.spire:season-1:island-1')
+    assert.equal(recipient.params['seasonName'], 'Season 1')
+  }
+  // No member list, no recipients: notify holds no membership table and must not guess.
+  const bare = registeredEvent('aetherholm.spire.captured', 'island-2', { seasonId: 'season-1' })
+  assert.deepEqual(RULES['aetherholm.spire.captured']?.recipients(bare), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
 })
 
 test('a dedupe key never contains the event id for a fact that two events can describe', () => {
