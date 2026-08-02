@@ -253,6 +253,18 @@ export const TEMPLATES = Object.freeze({
     path: '/play/rewards',
     text: en('You earned a reward', 'You earned {{rewardName}} in {{titleName}}.'),
   }),
+  'provision.failed': Object.freeze({
+    id: 'provision.failed',
+    category: 'billing',
+    params: ['entitlementId'],
+    path: '/play/worlds',
+    // The entitlement id is in the body deliberately: it is the one field a person quoting this
+    // to support cannot do without, and the refund names exactly it.
+    text: en(
+      'A world purchase could not be delivered',
+      'Your private world could not be set up. Nothing further is needed from you — the purchase (entitlement {{entitlementId}}) is being reviewed for refund or redelivery.',
+    ),
+  }),
   'community.proposal': Object.freeze({
     id: 'community.proposal',
     category: 'community',

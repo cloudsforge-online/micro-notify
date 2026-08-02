@@ -270,3 +270,46 @@ test('every template is reachable from some rule, or is a platform template', ()
     assert.ok(used.has(id) || platform.has(id), `${id} is written but nothing renders it`)
   }
 })
+
+test('provision.failed notifies the SUBJECT, and the service actor never becomes a recipient', () => {
+  // worlds.provision.failed is keyed by entitlement id, the buyer is payload.subject
+  // (worlds/src/provisioning.ts:608), and the envelope actor is `service:worlds` — so userIdOf's
+  // fallbacks find nobody. The rule reads subject explicitly; this pins both directions, the same
+  // trap as aetherholm.battle.resolved's raider/defender.
+  const event = registeredEvent('worlds.provision.failed', 'ent-1', {
+    provisionId: 'p-1',
+    entitlementId: 'ent-1',
+    subject: ALICE,
+    sku: 'private_world',
+    reason: 'title unreachable',
+  })
+  const set = RULES['worlds.provision.failed']?.recipients(event)
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients.length, 1)
+  assert.equal(set.recipients[0].userId, ALICE)
+  assert.equal(set.recipients[0].dedupeKey, 'provision.failed:ent-1')
+  // Without a subject: no_recipient, never a guess off the service actor.
+  const anonymous = registeredEvent('worlds.provision.failed', 'ent-2', { entitlementId: 'ent-2' })
+  assert.deepEqual(RULES['worlds.provision.failed']?.recipients(anonymous), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
+})
+
+test('emberkin.reward.granted names the Shards and dedupes on the journal entry', () => {
+  const event = registeredEvent('emberkin.reward.granted', 'season-1:' + ALICE, {
+    seasonId: 'season-1',
+    userId: ALICE,
+    reason: 'season placement',
+    amount: '250',
+    journalEntryId: 'j-9',
+  })
+  const set = RULES['emberkin.reward.granted']?.recipients(event)
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients[0].userId, ALICE)
+  assert.equal(set.recipients[0].dedupeKey, 'emberkin.reward:j-9')
+  assert.equal(set.recipients[0].params['rewardName'], '250 Shards')
+})
+

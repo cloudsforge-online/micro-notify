@@ -542,6 +542,45 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
+  'worlds.provision.failed': Object.freeze({
+    category: 'billing',
+    priority: 'high',
+    templateId: 'provision.failed',
+    why: 'Money was paid and the thing it bought was not delivered. That is the one game event a person must not discover by revisiting a screen.',
+    // NOT forUser: the payload names the buyer as `subject` (worlds/src/provisioning.ts:608) and
+    // the actor is `service:worlds`, so userIdOf would find nobody and the rule would silently
+    // notify no one — the same shape as the raider/defender trap in aetherholm.battle.resolved.
+    recipients: (event: InboundEvent): RecipientSet => {
+      const subject = str(event.payload, ['subject'], '')
+      if (!subject) return { kind: 'none', reason: 'no_recipient' }
+      const entitlementId = str(event.payload, ['entitlement_id', 'entitlementId'], event.key)
+      return {
+        kind: 'recipients',
+        recipients: [
+          {
+            userId: subject,
+            params: { entitlementId },
+            dedupeKey: `provision.failed:${entitlementId}`,
+            subjectUrn: `cf:worlds:entitlement:${entitlementId}`,
+          },
+        ],
+      }
+    },
+  }),
+  'emberkin.reward.granted': Object.freeze({
+    category: 'reward',
+    priority: 'normal',
+    templateId: 'reward.granted',
+    why: 'Same reasoning as worlds.reward.granted: Shards were earned, and a reward nobody was told about does not bring the player back.',
+    recipients: forUser(
+      (event) => `emberkin.reward:${str(event.payload, ['journalEntryId', 'journal_entry_id'], event.key)}`,
+      (event) => ({
+        rewardName: `${str(event.payload, ['amount'], 'a reward of')} Shards`,
+        titleName: 'Emberkin',
+      }),
+      () => 'cf:emberkin:reward',
+    ),
+  }),
   'worlds.reward.granted': Object.freeze({
     category: 'reward',
     priority: 'normal',
@@ -775,6 +814,20 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
   // Phase 2 changed the answer for two topics: battle.resolved and spire.captured now have
   // RULES above — the first game events worth an interruption. The phase-1 five below keep
   // their reasons, each a decision rather than a deferral, and season.sealed joins them.
+  'worlds.title.registered':
+    'An operator act on the platform with no player subject. The operator who ran it is looking at the result; a notification would inform the person who just did the thing.',
+  'worlds.provision.completed':
+    'Same reasoning as aetherholm.skerry.provisioned: the outcome surfaces on the worlds provisions screen the buyer is already on. The FAILURE notifies (see the rule), because a failure is the case the buyer is not watching for.',
+  'emberkin.achievement.unlocked':
+    'The player unlocked it in-game and the game celebrates it in-game. An out-of-band ping for an in-band moment trains people to ignore this channel; the feed keeps the record.',
+  'emberkin.battle.resolved':
+    'The player fought the battle themselves, watching. Confirming a thing the person just did is noise; the feed keeps the record.',
+  'emberkin.cosmetic.equipped':
+    'The player equipped it, in the wardrobe screen, on purpose. Nothing here is news to its only possible recipient.',
+  'emberkin.save.started':
+    'Starting a campaign is the beginning of a session, not an event to interrupt it with.',
+  'emberkin.season.started':
+    'A world event with no individual subject, like aetherholm.season.opened: announcing a season is marketing, and /admin/broadcasts is the honest channel for it.',
   'aetherholm.season.opened':
     'A world event with no individual subject. Announcing a season is product marketing, not a notification; a broadcast through /admin/broadcasts is the honest channel if one is wanted.',
   'aetherholm.city.founded':
