@@ -1086,18 +1086,33 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
    * taken at once, and each was taken by asking the SAME question that found `market.offer.made`:
    * **does this envelope name only the person who acted?**
    *
-   * Three answers came back:
+   * Three answers came back, and the third has since been closed by the producer:
    *
-   *   - Three name somebody who is not the actor, or an actor who has genuinely left. Those are
-   *     the rules below.
+   *   - Three name somebody who is not the actor, or an actor who has genuinely left. Those were
+   *     the first three rules below.
    *   - Two name the actor and nobody else because there is nobody else — the reader did the thing
    *     on purpose and is looking at the result, or the fact has no individual subject at all.
-   *     `NON_NOTIFYING_TOPICS`.
-   *   - **Two name only the actor while the news belongs to somebody they have never met.** Those
-   *     get no rule, because a rule would answer `no_recipient` for ever or address the wrong
-   *     person. They are recorded in `topics.ts`'s `UNPRODUCED_NOTIFICATIONS` as `no-subject`
-   *     against `micro-tessera`, which is the same shape and the same repair as market's offer —
-   *     one field off a row the emitting transaction already holds.
+   *     `NON_NOTIFYING_TOPICS`, and they are still there.
+   *   - **Two named only the actor while the news belonged to somebody they had never met.** Those
+   *     got no rule, because a rule would have answered `no_recipient` for ever or addressed the
+   *     wrong person, and they were recorded in `topics.ts`'s `UNPRODUCED_NOTIFICATIONS` as
+   *     `no-subject` against `micro-tessera` — the same shape and the same repair as market's offer.
+   *
+   * **Both of those two are rules now, and this is the third time that repair has run.** tessera
+   * `33ead39` puts `ownerSubject` on both payloads, read from `select owner_subject, ward_id from
+   * parcels where id = … for update` taken BEFORE the insert, in the lock order `moveParcel` uses.
+   * `settlement.outbound.failed` and `market.offer.made` closed the same way, which is three for
+   * three: every `no-subject` record this service has ever written has been closed by the producer
+   * adding one field off a row its emitting transaction already held, and none of them was closed
+   * by this service guessing. That is the argument for writing the record instead of the rule.
+   *
+   * One thing about the guarantee is worth carrying, because it is NOT the same as the market
+   * precedent. `market.listing.removed` had to read `refundedSubjects` before the releases because
+   * afterwards the rows leave `state='held'` and the information is gone. Neither tessera function
+   * mutates `parcels`, so the owner is never erased and the `for update` is a LOCK constraint
+   * rather than an information-destruction one — it is there so a transfer committing alongside
+   * cannot make `venue.booked` tell the FORMER owner they are owed money. Either way the subject on
+   * the envelope is authoritative as at emit time, and these two rules are written on that.
    */
 
   'tessera.object.fired': Object.freeze({
@@ -1208,6 +1223,116 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     },
   }),
 
+  'tessera.parcel.fallowed': Object.freeze({
+    category: 'ownership',
+    priority: 'high',
+    templateId: 'tessera.parcel_contested',
+    why: "Somebody has opened a claim on ground this reader holds, and the reader is by construction not there: a contest is only insertable 90 days after the last visitor or edit plus 30 more, on the DATABASE clock (`tessera_assert_contest_window`). Nothing else in the estate tells them. `tessera.parcel.transferred` is the same news arriving after it is too late to matter, and this is the only one that arrives while it is still a warning.",
+    // **`ownerSubject`, and emphatically not `forUser`.** The actor on this envelope is
+    // `user:<challenger>` (tessera/src/world.ts, `openContest`) and the key is the parcel, so BOTH
+    // of `userIdOf`'s fallbacks resolve somebody who must not be told: one a stranger who would be
+    // congratulated on a contest they already know they opened, the other a parcel id worn as a
+    // user id. The owner is a payload FIELD, exactly as `authorSubject` is on `object.anchored`,
+    // and `userOfSubject` rather than a slice because a parcel may be held by a service principal.
+    recipients: (event: InboundEvent): RecipientSet => {
+      const owner = userOfSubject(str(event.payload, ['owner_subject', 'ownerSubject'], ''))
+      if (owner.kind === 'none') return owner
+      const parcelId = str(event.payload, ['parcel_id', 'parcelId'], event.key)
+      return {
+        kind: 'recipients',
+        recipients: [
+          {
+            userId: owner.userId,
+            params: {
+              parcelId,
+              wardId: str(event.payload, ['ward_id', 'wardId'], ''),
+            },
+            // The CONTEST, not the parcel: `contests_status_known` allows `withdrawn`, so one
+            // parcel can be contested, released and contested again, and each is real news —
+            // `tessera.parcel_lost` makes the same argument about the same parcel.
+            //
+            // The fallback is the PARCEL rather than `event.id`. `tessera_one_open_contest` is a
+            // partial unique index on `(parcel_id) where status = 'open'`, so at most one contest
+            // on a parcel is open at a time and the parcel identifies it; `event.id` differs on
+            // every delivery and would dedupe nothing at all, which is the worse degradation.
+            dedupeKey: `tessera.parcel_contested:${str(event.payload, ['contest_id', 'contestId'], parcelId)}`,
+            subjectUrn: `cf:tessera:parcel:${parcelId}`,
+          },
+        ],
+      }
+    },
+  }),
+
+  'tessera.venue.booked': Object.freeze({
+    category: 'ownership',
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // `high`, AND THE ARGUMENT FOR NOT MAKING IT `critical` IS THE POINT.
+    //
+    // This is money owed and a date somebody else has put in the reader's diary, which is
+    // `market.listing.sold` — "A sale is money in. The seller should not find out by checking." —
+    // with a deadline attached. `high` is what that topic takes and this one is not lesser news.
+    //
+    // It is not `critical`, for two separate reasons that would each be sufficient:
+    //
+    //   1. Nothing is at risk if a preference silences it. The failed-withdrawal precedent earned
+    //      `critical` because the money was HELD and no other topic in the estate would ever say
+    //      so; here the fee is escrowed in a ledger reservation that `bookings_open_holds_money`
+    //      (tessera/src/migrations.ts, the bookings CHECK) makes non-optional, and the booking is
+    //      on the parcel's own calendar. A suppressed notification costs a heads-up, not funds.
+    //   2. `critical` is exactly 04-domain-model §10.3's five, enumerated by a test. Adding a sixth
+    //      is a decision to WIDEN §10.3, not a priority choice — and every unnecessary critical is
+    //      a preference page that stops working.
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    priority: 'high',
+    templateId: 'tessera.venue_booked',
+    why: "A stranger has taken an hour of the reader's calendar and escrowed a fee against it, and the reader did nothing to cause either. The booker is looking at their own confirmation; the owner is not looking at anything, because a Venue is booked without asking them. Silence here costs an owner who does not turn up and a booker who paid for a room nobody opened.",
+    // The same `ownerSubject`/not-`forUser` argument as `parcel.fallowed` above, and the stakes are
+    // higher by exactly one field: the actor is `user:<bookedBy>`, so a rule that took the actor
+    // would tell the BOOKER they are owed money for their own booking.
+    recipients: (event: InboundEvent): RecipientSet => {
+      const owner = userOfSubject(str(event.payload, ['owner_subject', 'ownerSubject'], ''))
+      if (owner.kind === 'none') return owner
+      const parcelId = str(event.payload, ['parcel_id', 'parcelId'], event.key)
+      const slot = str(event.payload, ['slot'], '')
+      return {
+        kind: 'recipients',
+        recipients: [
+          {
+            userId: owner.userId,
+            params: {
+              parcelId,
+              // `formatInstant` passes an unparseable value through unchanged, so the fallback is
+              // a sentence rather than a blank where the date should be.
+              slot: formatInstant(slot || 'a time shown on the parcel calendar'),
+              // ─────────────────────────────────────────────────────────────────────────────────
+              // `priceWei` IS ON THE PAYLOAD AND IS DELIBERATELY NOT IN THE WORDS.
+              //
+              // It is an integer count of the smallest unit — `tessera_booking_price_whole_sparks`
+              // constrains it to a whole multiple of `WEI_PER_SPARK`, which is 10^12 — so the
+              // amount a person would recognise is `priceWei / WEI_PER_SPARK` Sparks. That divisor
+              // lives in `tessera/src/sparks.ts` and is exported by no shared package, so notify
+              // could only obtain it by keeping a second copy of a denomination. A copy that drifts
+              // states the wrong amount of money in a sentence about money, which is worse than
+              // stating none; and rendering the raw integer reads as either a bug or a fortune.
+              //
+              // So the template says the fee is escrowed and points at the parcel, where the figure
+              // is shown with its unit. What would change this: `priceSparks` on the payload, or
+              // the denomination exported from `@cloudsforge/contracts-*`. Not a guess here.
+              // ─────────────────────────────────────────────────────────────────────────────────
+            },
+            // The BOOKING: a Venue with two slots taken is two pieces of news, and keying on the
+            // parcel would silence every booking after the first. The fallback is parcel-and-slot
+            // rather than the parcel alone because that pair is precisely what the database uses to
+            // identify an open booking (`tessera_one_open_booking`, unique on `(parcel_id, slot)
+            // where status = 'open'`), so the degraded key is still the right one.
+            dedupeKey: `tessera.venue_booked:${str(event.payload, ['booking_id', 'bookingId'], `${parcelId}:${slot}`)}`,
+            subjectUrn: `cf:tessera:parcel:${parcelId}`,
+          },
+        ],
+      }
+    },
+  }),
+
   /* --------------------------------------------------------- platform */
 
 } satisfies Readonly<Record<string, Rule>>)
@@ -1300,19 +1425,21 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
   'settlement.outbound.confirmed':
     "wallet's own narrow name for the same movement settlement.withdrawal.completed announces (settlement/src/withdrawals.ts:437 and :449 emit both from one function). It exists to release the reservation at wallet/src/server.ts:846 and carries a withdrawal id, a hash and a timestamp. A rule here as well would tell one user their withdrawal arrived twice. Note that this is NOT the shape of the failure twin, which had no user-facing counterpart at all and is now mapped: a second rule here would duplicate a notification, whereas the failure had none.",
   // ── tessera ────────────────────────────────────────────────────────────────────────────────
-  // Four of the seven, and they are here for TWO different reasons that must not be read as one.
-  // The first two are decisions: the fact reaches nobody because there is nobody it is news to.
-  // The last two are DEFERRALS, and each carries a matching `no-subject` record in `topics.ts`
-  // naming `micro-tessera` as the owner — the same pairing `settlement.outbound.failed` had while
-  // it was blocked, and the reason it stopped being blocked in an hour.
+  // TWO of the seven, and both are decisions: the fact reaches nobody because there is nobody it
+  // is news to. There used to be four.
+  //
+  // `tessera.parcel.fallowed` and `tessera.venue.booked` were the other two and were NOT decisions
+  // — each was a DEFERRAL, recorded here as such and paired with a `no-subject` record in
+  // `topics.ts` naming `micro-tessera` as the owner. tessera `33ead39` put `ownerSubject` on both
+  // payloads, so both are rules above and both records are deleted. Keeping either entry here now
+  // would say the envelope names nobody beside a rule that reads the somebody it names, and
+  // `topics.test.ts` fails on exactly that: a registered topic may be mapped OR recorded, never
+  // both. That is the third time this pairing has resolved this way — see the tessera block comment
+  // in `RULES` for why the record was the right thing to write instead of the rule.
   'tessera.parcel.claimed':
     'The claimant claimed it, in the client, and is standing on the ground they just took — land is free and the claim is synchronous (world.ts, the emit is inside the same transaction as the insert). aetherholm.city.founded exactly. The only other party is the ward, which is not a person.',
   'tessera.ward.opened':
     'A world event with no individual subject: the payload is a ward id, a slug, an archetype, an ordinal and a tile count, and names no user at all. Opening a ward is inventory, announced when it is worth announcing through /admin/broadcasts. aetherholm.season.opened.',
-  'tessera.parcel.fallowed':
-    "DEFERRED, not declined. The payload is `{ parcelId, contestId, challengerSubject }` and the actor is the challenger, so every route to a person on this envelope resolves the person CONTESTING the parcel. The reader who needs it is the current owner, who is about to lose ground they hold and is named nowhere — a rule today would tell the challenger they had challenged. See UNPRODUCED_NOTIFICATIONS, `blockedBy: 'no-subject'`, owner micro-tessera.",
-  'tessera.venue.booked':
-    "DEFERRED, not declined. `bookedBy` is on the payload and is the actor as well, so the only resolvable person is the one who made the booking and is looking at their confirmation. The parcel's owner — whose calendar this fills and whose venue this pays for — is named nowhere on the envelope. See UNPRODUCED_NOTIFICATIONS, `blockedBy: 'no-subject'`, owner micro-tessera.",
   'settlement.sweep.completed':
     "A deposit address emptied into the pinned treasury. No user balance changes — wallet credited the deposit when it confirmed, long before the sweep — so there is nothing here a person could act on or would recognise. It exists for reconciliation, which is the one movement no other topic reports, and it is keyed by the sweep source rather than by anybody.",
 })

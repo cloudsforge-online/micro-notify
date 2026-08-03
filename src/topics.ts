@@ -98,6 +98,23 @@
  * paragraph is the one part of this file nothing can fail on, so it is the part that rots. What is
  * checked rather than written is in `topics.test.ts`, "every no-subject record that a producer has
  * since fixed is gone", which asserts the rule exists and the record does not.
+ *
+ * ## And so did the two after them, which makes it four for four
+ *
+ * `tessera.parcel.fallowed` and `tessera.venue.booked` were recorded the same night, found by asking
+ * every topic in the estate the question that found the offer — "does the envelope name only the
+ * person who acted?" — and were the harder pair, because on both of them the actor is a perfectly
+ * good user id. A rule reading it would have resolved somebody, rendered, and delivered: the
+ * challenger told that they had challenged, the booker told that they were owed their own money.
+ * `micro-tessera` 33ead39 added `ownerSubject` to both, off the `parcels` row each emitting
+ * transaction already held `for update`, and both are rules now.
+ *
+ * **Four `no-subject` records, four closed by the producer adding one field, none closed by this
+ * service guessing a recipient.** That is the argument for the record: writing the rule anyway
+ * would have satisfied every coverage test in this repository and produced four notifications for
+ * the wrong people, and none of the four fields would exist. `topics.test.ts` asserts the set is
+ * empty now — "the tessera deferrals are gone from every place that claimed the gap" — so a fifth
+ * has to be declared rather than accumulated.
  */
 
 import {
@@ -282,35 +299,36 @@ export const UNPRODUCED_NOTIFICATIONS: readonly UnproducedNotification[] = Objec
    * subject". It does. That entry needs deleting too, and it is not in this repository's gift.
    * ──────────────────────────────────────────────────────────────────────────────────────────── */
   /* ────────────────────────────────────────────────────────────────────────────────────────────
-   * The two below are NEW, and adding a `no-subject` record hours after congratulating this file
-   * on emptying the last two is the honest outcome rather than an embarrassing one. `micro-org`'s
-   * sweep found the class by asking one question of every topic in the estate — "does the envelope
-   * name only the person who acted?" — and `micro-contracts` 41751b1 registered seven tessera
-   * topics at once. Asking that question of all seven found two more instances of the identical
-   * defect, in a producer that had not existed when the previous two were written.
+   * DELETED, BOTH: 'your parcel is being contested' and 'somebody booked your venue', guessed at
+   * `tessera.parcel.contested` and `tessera.venue.booked_for_owner`, recorded
+   * `blockedBy: 'no-subject'` against `tessera.parcel.fallowed` and `tessera.venue.booked`.
    *
-   * That is the class being findable rather than the class recurring, and the repair is the same
-   * one field off a row the emitting transaction already holds. Both are `micro-tessera`'s, and
-   * neither is in this repository's gift.
+   * They were written hours after this file had congratulated itself on emptying the last two, and
+   * writing them was the honest outcome rather than an embarrassing one: `micro-org`'s sweep found
+   * the CLASS by asking one question of every topic in the estate — "does the envelope name only
+   * the person who acted?" — and `micro-contracts` 41751b1 had just registered seven tessera topics
+   * at once. Two of the seven answered yes. That was the class being findable, not the class
+   * recurring, and it is the second half of that sentence these deletions settle.
+   *
+   * `micro-tessera` 33ead39 puts `ownerSubject` on both payloads, read from `select owner_subject,
+   * ward_id from parcels where id = … for update` taken before the insert, in the order
+   * `moveParcel` locks so the two serialise rather than deadlock. Its own test asserts the field as
+   * a DIFFERENCE — Alice owns, Bob acts — because a payload deriving the owner from the actor
+   * satisfies any presence check and names exactly the wrong person.
+   *
+   * That is FOUR no-subject records closed the same way in one night — `settlement.outbound.failed`,
+   * `market.offer.made`, and these two — every one by the producer adding one field off a row its
+   * emitting transaction already held, and not one by this service guessing. The refusal to write a
+   * rule was the thing that produced the field.
+   *
+   * Both rules are in `catalogue.ts`, both resolve via `ownerSubject` and NOT `forUser` (the actor
+   * is the challenger and the booker), and both `NON_NOTIFYING_TOPICS` entries are gone with them —
+   * `contradictedGaps()` and the mapped-or-recorded check each fail while a record and a rule stand
+   * together, which is the property the five deleted records did not have.
+   *
+   * micro-org's `tools/estate-topic-gaps.json` should be checked for entries mirroring these two,
+   * as it was for `market.offer.made`. That is not in this repository's gift.
    * ──────────────────────────────────────────────────────────────────────────────────────────── */
-  Object.freeze({
-    requirement: 'your parcel is being contested',
-    guessedTopic: 'tessera.parcel.contested',
-    emits: 'tessera.parcel.fallowed',
-    blockedBy: 'no-subject',
-    owner: 'micro-tessera',
-    evidence:
-      "tessera/src/world.ts, `openContest` — the emit's payload is `{ parcelId, contestId, challengerSubject }` and its actor is `user:<challenger>`, so both subjects on the envelope are the CHALLENGER and the key is the parcel. The owner about to lose the ground is on the `parcels` row and is not read: the insert is `values (${input.parcelId}, ${input.challengerSubject})` and nothing selects `owner_subject`. One field — `ownerSubject`, off the parcel row — and the rule is writable, exactly as `sellerSubject` was for market.offer.made. Losing land you have held for four months with no warning is the clearest AD-08 case tessera has.",
-  }),
-  Object.freeze({
-    requirement: 'somebody booked your venue',
-    guessedTopic: 'tessera.venue.booked_for_owner',
-    emits: 'tessera.venue.booked',
-    blockedBy: 'no-subject',
-    owner: 'micro-tessera',
-    evidence:
-      "tessera/src/economy.ts, the VENUE_BOOKED emit — payload `{ bookingId, parcelId, slot, bookedBy, priceWei, reservationId }`, actor `user:<bookedBy>`. `bookedBy` is the booker, who is looking at their own confirmation; the parcel's OWNER is being paid `priceWei` and having their calendar filled, and appears nowhere. The row the transaction inserts against carries `parcel_id`, so the owner is one join from the emit site. Note the booker is correctly NOT the recipient: a rule reading `bookedBy` would pass every test and notify the wrong person, which is the failure mode market.offer.made would have shipped.",
-  }),
   Object.freeze({
     requirement: 'auction ended',
     guessedTopic: 'market.auction.ended',

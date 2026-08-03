@@ -762,4 +762,211 @@ describe('pipeline', { skip }, () => {
     assert.match(text, /still held/)
     assert.doesNotMatch(text, /coming back|being returned to your balance/)
   })
+
+  /* ---------------------------------------------------------------- tessera's two owner topics
+   *
+   * `tessera.parcel.fallowed` and `tessera.venue.booked` were refused a rule twice, recorded
+   * `blockedBy: 'no-subject'`, because the envelope named the CHALLENGER and the BOOKER. tessera
+   * 33ead39 added `ownerSubject` to both, read off the `parcels` row the emitting transaction
+   * already held `for update`.
+   *
+   * `catalogue.test.ts` grades the rule. These grade the four things after it that a unit test on
+   * the rule cannot see — the row the pipeline writes, the priority the preference filter applies
+   * to it, the words the renderer builds, and which address the adapter is handed — because the
+   * failure worth catching here is not "no notification". It is **a notification, well formed and
+   * delivered, to Bob.** ALICE owns; BOB acts; every assertion below is a difference.
+   *
+   * `PARCEL` is a uuid that is nobody's user id, because it is the envelope key for both topics and
+   * a key fallback would be well formed and wrong.
+   */
+
+  const PARCEL = '55555555-5555-4555-8555-555555555555'
+  const CONTEST = '66666666-6666-4666-8666-666666666666'
+  const BOOKING = '77777777-7777-4777-8777-777777777777'
+  const SLOT = '2026-09-01T18:00:00.000Z'
+
+  /** `openContest`, tessera/src/world.ts: actor is the CHALLENGER, key is the parcel. */
+  function fallowed(payload: Record<string, unknown>) {
+    return registeredEvent('tessera.parcel.fallowed', PARCEL, payload, { actor: `user:${BOB}` })
+  }
+
+  /** `bookVenue`, tessera/src/economy.ts: actor is the BOOKER, key is the parcel. */
+  function booked(payload: Record<string, unknown>) {
+    return registeredEvent('tessera.venue.booked', PARCEL, payload, { actor: `user:${BOB}` })
+  }
+
+  test('a contest reaches the owner losing the ground, and never the challenger who opened it', async () => {
+    const rig = testRig(sql)
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: BOB, channel: 'email', address: 'bob@example.test' })
+
+    const outcome = await ingestEvent(
+      rig.deps,
+      fallowed({
+        parcelId: PARCEL,
+        wardId: 'ward-1',
+        contestId: CONTEST,
+        ownerSubject: `user:${ALICE}`,
+        challengerSubject: `user:${BOB}`,
+      }),
+    )
+    assert.equal(outcome.kind, 'processed')
+
+    const rows = await sql<Array<{ user_id: string; priority: string; template_id: string }>>`
+      select user_id, priority, template_id from notifications
+    `
+    assert.equal(rows.length, 1, 'the challenger was told about their own contest as well')
+    assert.equal(rows[0]?.user_id, ALICE)
+    assert.notEqual(rows[0]?.user_id, BOB, 'the actor on this envelope')
+    assert.notEqual(rows[0]?.user_id, PARCEL, 'the envelope key')
+    assert.equal(rows[0]?.priority, 'high')
+    assert.equal(rows[0]?.template_id, 'tessera.parcel_contested')
+
+    await dispatchDue(rig.deps, 50)
+    // Not one message to Bob on any channel — the assertion the rule-level test cannot make,
+    // because a second recipient would only appear once the pipeline has fanned out.
+    for (const recorder of Object.values(rig.adapters)) {
+      for (const { message } of recorder.sent) {
+        assert.equal(message.userId, ALICE, 'a message was addressed to somebody who is not the owner')
+      }
+    }
+    const email = rig.adapters.email.sent[0]?.message
+    assert.equal(email?.address, 'alice@example.test')
+    const text = `${email?.subject}\n${email?.body}`
+    assert.match(text, new RegExp(PARCEL), 'which parcel — a reader may hold dozens')
+    assert.match(text, /still yours/, 'what is NOT lost, or the reader learns only that they lost')
+    // Bad news, in the second person, about the reader's own ground: it must not read as a
+    // congratulation to a challenger, which is what the same words sent to Bob would be.
+    assert.doesNotMatch(text, /you have contested|your contest|congratul/i)
+  })
+
+  test('a venue booking reaches the owner being paid, and never the booker who made it', async () => {
+    const rig = testRig(sql)
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: BOB, channel: 'email', address: 'bob@example.test' })
+
+    await ingestEvent(
+      rig.deps,
+      booked({
+        bookingId: BOOKING,
+        parcelId: PARCEL,
+        wardId: 'ward-1',
+        slot: SLOT,
+        ownerSubject: `user:${ALICE}`,
+        bookedBy: `user:${BOB}`,
+        priceWei: '5000000000000',
+        reservationId: 'res-1',
+      }),
+    )
+
+    const rows = await sql<Array<{ user_id: string; priority: string; template_id: string }>>`
+      select user_id, priority, template_id from notifications
+    `
+    assert.equal(rows.length, 1)
+    // The expensive one: `bookedBy` is also the actor, so both of the obvious implementations
+    // resolve Bob and tell the booker that they are owed money for their own booking.
+    assert.equal(rows[0]?.user_id, ALICE)
+    assert.notEqual(rows[0]?.user_id, BOB)
+    assert.notEqual(rows[0]?.user_id, PARCEL)
+    assert.equal(rows[0]?.priority, 'high')
+    assert.equal(rows[0]?.template_id, 'tessera.venue_booked')
+
+    await dispatchDue(rig.deps, 50)
+    for (const recorder of Object.values(rig.adapters)) {
+      for (const { message } of recorder.sent) {
+        assert.equal(message.userId, ALICE)
+      }
+    }
+    const email = rig.adapters.email.sent[0]?.message
+    assert.equal(email?.address, 'alice@example.test')
+    const text = `${email?.subject}\n${email?.body}`
+    assert.match(text, /2026-09-01 18:00 UTC/)
+    assert.match(text, /escrowed/)
+    // The raw wei figure, delivered. It is a whole multiple of 10^12 and the divisor that turns it
+    // into Sparks lives in micro-tessera and is exported by nothing, so the sentence names no
+    // amount at all rather than a wrong one or an unreadable one.
+    assert.doesNotMatch(text, /5000000000000/)
+  })
+
+  /**
+   * `high` and not `critical`, proved by the only thing that can tell them apart.
+   *
+   * The catalogue test pins the literal, which a rule change edits in one place. This shows the
+   * consequence: a reader who has muted everything hears NOTHING about their venue, and that is
+   * the intended behaviour — the fee is escrowed in a ledger reservation `bookings_open_holds_money`
+   * makes non-optional, so a silenced notification costs a heads-up rather than money. It is the
+   * same test the failed-withdrawal rule applied to reach the opposite answer for HELD funds, and
+   * running it in the direction that produces silence is what keeps the critical set at five.
+   */
+  test('a booking is suppressed for an owner who has muted everything — it is high, not critical', async () => {
+    const rig = testRig(sql)
+    await upsertPreferences(sql, ALICE, everythingDisabled())
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+
+    const outcome = await ingestEvent(
+      rig.deps,
+      booked({
+        bookingId: BOOKING,
+        parcelId: PARCEL,
+        slot: SLOT,
+        ownerSubject: `user:${ALICE}`,
+        bookedBy: `user:${BOB}`,
+        priceWei: '5000000000000',
+        reservationId: 'res-1',
+      }),
+    )
+    assert.equal(outcome.kind, 'processed')
+    if (outcome.kind !== 'processed') return
+    assert.deepEqual(outcome.created, [], 'a critical would have been forced through §10.3')
+    assert.equal(outcome.suppressed.length, 1)
+
+    await dispatchDue(rig.deps, 50)
+    assert.equal(rig.adapters.email.sent.length, 0)
+  })
+
+  /**
+   * **Yesterday's payloads, through the whole pipeline, for both topics.**
+   *
+   * These are the shapes `openContest` and `bookVenue` emitted before tessera 33ead39, and they are
+   * the trap this estate hit twice in one night: an end-to-end test fed only today's payload stays
+   * GREEN with the recipient logic broken, because an absent field is null to every reader and a
+   * rule that falls back to the actor produces a notification that is well formed, addressable and
+   * renders perfectly. It goes to the challenger, or to the booker.
+   *
+   * So both are driven through `ingestEvent` and the assertion is that NOTHING is written.
+   * `no_recipient` is the honest answer and it names a producer to go and fix; a row here would
+   * mean this service had invented a recipient out of the only user id on the envelope.
+   */
+  test("yesterday's tessera payloads write nothing, rather than a notification for the actor", async () => {
+    const rig = testRig(sql)
+    await upsertTarget(sql, { userId: BOB, channel: 'email', address: 'bob@example.test' })
+
+    // `{ parcelId, contestId, challengerSubject }` — no owner, and Bob on the actor and the payload.
+    const contest = await ingestEvent(
+      rig.deps,
+      fallowed({ parcelId: PARCEL, contestId: CONTEST, challengerSubject: `user:${BOB}` }),
+    )
+    assert.deepEqual(contest, { kind: 'ignored', reason: 'no_recipient' })
+
+    // `{ bookingId, parcelId, slot, bookedBy, priceWei, reservationId }` — likewise.
+    const booking = await ingestEvent(
+      rig.deps,
+      booked({
+        bookingId: BOOKING,
+        parcelId: PARCEL,
+        slot: SLOT,
+        bookedBy: `user:${BOB}`,
+        priceWei: '5000000000000',
+        reservationId: 'res-1',
+      }),
+    )
+    assert.deepEqual(booking, { kind: 'ignored', reason: 'no_recipient' })
+
+    const rows = await sql<Array<{ n: number }>>`select count(*)::int as n from notifications`
+    assert.equal(rows[0]?.n, 0, 'a notification was written for a recipient nobody named')
+    await dispatchDue(rig.deps, 50)
+    assert.equal(rig.adapters.email.sent.length, 0, 'the actor was told about his own act')
+    // Counted, so an operator sees a producer to page rather than silence. Two events, two counts.
+    assert.equal(counterValue(rig.metrics, 'notify_suppressed_total', { reason: 'no_recipient' }), 2)
+  })
 })

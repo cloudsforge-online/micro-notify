@@ -114,14 +114,21 @@ test('every unproduced notification names the producer that decided it', () => {
       'deposit detected, before confirmation',
       'risk limit reached',
       'service incident',
-      // Added when `micro-contracts` 41751b1 registered tessera's seven topics and all seven were
+      // REMOVED, both: 'somebody booked your venue' and 'your parcel is being contested'. They were
+      // added when `micro-contracts` 41751b1 registered tessera's seven topics and all seven were
       // put to the question that found market.offer.made — "does the envelope name only the person
-      // who acted?". Two said yes: `tessera.parcel.fallowed` names the challenger and not the owner
-      // losing the ground, `tessera.venue.booked` names the booker and not the owner being paid.
-      // Both are `blockedBy: 'no-subject'` against `micro-tessera`, and each needs one field off a
-      // row its emitting transaction already holds.
-      'somebody booked your venue',
-      'your parcel is being contested',
+      // who acted?". Two said yes: `tessera.parcel.fallowed` named the challenger and not the owner
+      // losing the ground, `tessera.venue.booked` named the booker and not the owner being paid.
+      //
+      // `micro-tessera` 33ead39 put `ownerSubject` on both payloads, off the parcel row the emitting
+      // transaction already held `for update`, so both sentences stopped being true and both rules
+      // are written. Deleting a record needs the rule that justifies it, which is what this
+      // assertion is for in this direction — see 'the tessera deferrals are gone from every place
+      // that claimed the gap' below, which asserts all four moves for both topics.
+      //
+      // What is left is four records with NO event at all (`no-event`) or another channel. Not one
+      // `no-subject` record remains: every one this service ever wrote was closed by its producer
+      // adding one field, three times over, and never by this service guessing a recipient.
     ],
     'a recorded gap was added or removed — say which, and why, here',
   )
@@ -409,6 +416,66 @@ test('the failed-withdrawal record is gone from every place that claimed the gap
       (each) => each.requirement === 'withdrawal transaction failed outright',
     ),
     false,
+  )
+})
+
+/**
+ * The two tessera deferrals, checked the same four ways — and one more the other two did not need.
+ *
+ * These were the third and fourth `no-subject` records this service wrote, and they closed the same
+ * way the first two did: `micro-tessera` 33ead39 added `ownerSubject` to both payloads, read off
+ * the `parcels` row the emitting transaction already held `for update`. Four things had to move
+ * together for each, and a test that checked only `hasRule` would let the other three rot:
+ *
+ *   1. the rule exists;
+ *   2. the `UNPRODUCED_NOTIFICATIONS` record is gone — `contradictedGaps()` fails while both stand;
+ *   3. the `NON_NOTIFYING_TOPICS` entry is gone — it said the envelope names nobody, now false;
+ *   4. the requirement is not silently dropped with the record.
+ *
+ * The fifth is what makes this different from the withdrawal's. Those two records were closed by a
+ * field that was already the only person on the envelope. **These two were closed by a field that
+ * competes with one already there** — `challengerSubject` and `bookedBy`, both live, both users,
+ * both wrong — so the rule can be perfectly reachable and still address the wrong person. That is a
+ * property of the RULE and not of the tables, so it is asserted where the payload is:
+ * `catalogue.test.ts`, "notifies the OWNER … never the challenger/booker who …", each fed
+ * yesterday's shape first.
+ */
+test('the tessera deferrals are gone from every place that claimed the gap', () => {
+  for (const topic of ['tessera.parcel.fallowed', 'tessera.venue.booked']) {
+    assert.equal(hasRule(topic), true, `${topic}: the rule the record said was impossible`)
+    assert.equal(isRegisteredTopic(topic), true)
+    assert.equal(isKnownTopic(topic), true)
+    assert.equal(
+      UNPRODUCED_NOTIFICATIONS.some((each) => each.emits === topic),
+      false,
+      `${topic}: a record saying this cannot be notified on, beside the rule that notifies on it`,
+    )
+    assert.equal(
+      Object.hasOwn(NON_NOTIFYING_TOPICS, topic),
+      false,
+      `${topic}: both mapped and recorded as not notifying — the table can only mean one of them`,
+    )
+    assert.equal(
+      Object.hasOwn(AWAITING_REGISTRATION, topic),
+      false,
+      `${topic}: registered by contracts 41751b1; a quarantine entry would be an adopted one kept`,
+    )
+  }
+  for (const requirement of ['your parcel is being contested', 'somebody booked your venue']) {
+    assert.equal(
+      UNPRODUCED_NOTIFICATIONS.some((each) => each.requirement === requirement),
+      false,
+      `${requirement}: the record is gone but the requirement went with it`,
+    )
+  }
+  // And nothing is blocked on a subject any more. Every `no-subject` record this service has ever
+  // written — four of them — was closed by its producer adding one field off a row the emitting
+  // transaction already held, and not one by this service inventing a recipient. An empty set here
+  // is the claim; if a fifth is ever written, this line is what has to be edited to say so.
+  assert.deepEqual(
+    UNPRODUCED_NOTIFICATIONS.filter((each) => each.blockedBy === 'no-subject').map((each) => each.emits),
+    [],
+    'a new no-subject record — name it here, and name the producer that owes the field',
   )
 })
 

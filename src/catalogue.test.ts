@@ -20,7 +20,7 @@ import {
   ruleFor,
   unmappedRegistryTopics,
 } from './catalogue.ts'
-import { CATEGORIES, DEFAULT_LOCALE, PRIORITIES, isCategory, isPriority } from './model.ts'
+import { CATEGORIES, DEFAULT_LOCALE, PRIORITIES, PRIORITY_RANK, isCategory, isPriority } from './model.ts'
 import { TEMPLATES, isTemplateId, renderTemplate, templateFor } from './templates.ts'
 import { UNPRODUCED_NOTIFICATIONS } from './topics.ts'
 import { registeredEvent, unregisteredEvent, ALICE, BOB } from './testsupport.ts'
@@ -953,24 +953,293 @@ test('a traded parcel is not_applicable — two people agreed to it and are both
   })
 })
 
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * THE TWO DEFERRALS THAT CLOSED, AND THE ONE THING THESE TESTS ARE FOR.
+ *
+ * Both of these topics were recorded `blockedBy: 'no-subject'` and refused a rule, twice, because
+ * the envelope named the CHALLENGER and the BOOKER — the person who acted — and not the owner
+ * losing ground or the owner being paid. `micro-tessera` 33ead39 added `ownerSubject` to both
+ * payloads, off the `parcels` row the emitting transaction already held `for update`.
+ *
+ * So the failure these tests exist to catch is not "the rule is missing". It is **the rule tells
+ * the wrong person**, which is the failure a presence check cannot see: on both topics the actor is
+ * a perfectly good user id, so `forUser` would resolve somebody, produce a well-formed notification
+ * and render it. Every case below therefore asserts a DIFFERENCE — Alice owns, Bob acts — never
+ * merely that a recipient exists.
+ *
+ * And each is preceded by YESTERDAY'S payload, the shape the producer emitted before 33ead39, which
+ * must answer `no_recipient` rather than falling back to the actor or to the envelope key. An
+ * absent field is null to every reader, and a rule that guesses passes any test fed only today's
+ * shape.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════ */
+
+const CONTEST = '88888888-8888-4888-8888-888888888888'
+const BOOKING = '99999999-9999-4999-8999-999999999999'
+const SLOT = '2026-09-01T18:00:00.000Z'
+
+/** `openContest` emits this: actor `user:<challenger>`, key the PARCEL. tessera/src/world.ts. */
+function fallowedEvent(owner: unknown, challenger = `user:${BOB}`) {
+  return registeredEvent(
+    'tessera.parcel.fallowed',
+    PARCEL,
+    {
+      parcelId: PARCEL,
+      wardId: 'ward-1',
+      contestId: CONTEST,
+      ...(owner === undefined ? {} : { ownerSubject: owner }),
+      challengerSubject: challenger,
+    },
+    { actor: `user:${BOB}` },
+  )
+}
+
+/** `bookVenue` emits this: actor `user:<bookedBy>`, key the PARCEL. tessera/src/economy.ts. */
+function bookedEvent(owner: unknown, bookingId = BOOKING, slot = SLOT) {
+  return registeredEvent(
+    'tessera.venue.booked',
+    PARCEL,
+    {
+      bookingId,
+      parcelId: PARCEL,
+      wardId: 'ward-1',
+      slot,
+      ...(owner === undefined ? {} : { ownerSubject: owner }),
+      bookedBy: `user:${BOB}`,
+      priceWei: '5000000000000',
+      reservationId: 'res-1',
+    },
+    { actor: `user:${BOB}` },
+  )
+}
+
+test('a contest notifies the OWNER losing the ground, never the challenger who opened it', () => {
+  const set = RULES['tessera.parcel.fallowed']?.recipients(fallowedEvent(`user:${ALICE}`))
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients.length, 1)
+  assert.equal(set.recipients[0].userId, ALICE)
+  // The three wrong answers, each of which is reachable by a plausible implementation: the actor
+  // (`forUser`'s last resort), the payload's other subject, and the envelope key.
+  assert.notEqual(set.recipients[0].userId, BOB, 'the challenger, from the actor or challengerSubject')
+  assert.notEqual(set.recipients[0].userId, PARCEL, 'the envelope key is the parcel')
+  assert.notEqual(set.recipients[0].userId, CONTEST)
+  assert.equal(set.recipients[0].params['parcelId'], PARCEL)
+  assert.equal(set.recipients[0].params['wardId'], 'ward-1')
+  assert.equal(set.recipients[0].subjectUrn, `cf:tessera:parcel:${PARCEL}`)
+  // The CONTEST: `contests_status_known` allows `withdrawn`, so one parcel can be contested twice
+  // and each is news. Keyed on the parcel alone would silence the second.
+  assert.equal(set.recipients[0].dedupeKey, `tessera.parcel_contested:${CONTEST}`)
+})
+
+test("yesterday's fallowed payload, with no owner, is no_recipient rather than the challenger", () => {
+  // `{ parcelId, contestId, challengerSubject }` — exactly what `openContest` emitted before
+  // tessera 33ead39. Both routes to a person on this envelope reach Bob, and both are wrong.
+  assert.deepEqual(RULES['tessera.parcel.fallowed']?.recipients(fallowedEvent(undefined)), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
+})
+
+test('a parcel held by a service principal is not_applicable, never a user id spelled from it', () => {
+  // A parcel's owner is whatever `ensureAccount` was handed, and `tessera/src/server.ts` takes it
+  // from the request principal — which may be a service. `service:` is a recognised non-person, so
+  // this is `not_applicable`; a bare uuid would be `no_recipient`, and slicing would file the
+  // notification against a "user" called `tessera-bot`.
+  assert.deepEqual(RULES['tessera.parcel.fallowed']?.recipients(fallowedEvent('service:tessera-bot')), {
+    kind: 'none',
+    reason: 'not_applicable',
+  })
+  assert.deepEqual(RULES['tessera.venue.booked']?.recipients(bookedEvent('service:tessera-bot')), {
+    kind: 'none',
+    reason: 'not_applicable',
+  })
+  // And a subject with no recognised prefix at all is a PRODUCER to fix, not a principal to skip.
+  assert.deepEqual(RULES['tessera.venue.booked']?.recipients(bookedEvent(ALICE)), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
+})
+
+test('a venue booking notifies the OWNER being paid, never the booker who made it', () => {
+  const set = RULES['tessera.venue.booked']?.recipients(bookedEvent(`user:${ALICE}`))
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients.length, 1)
+  assert.equal(set.recipients[0].userId, ALICE)
+  // The most expensive of the three wrong answers is Bob: `bookedBy` IS the actor, so a rule using
+  // `forUser` resolves him and tells the booker they are owed money for their own booking.
+  assert.notEqual(set.recipients[0].userId, BOB, 'the booker, from the actor or bookedBy')
+  assert.notEqual(set.recipients[0].userId, PARCEL, 'the envelope key is the parcel')
+  assert.notEqual(set.recipients[0].userId, BOOKING)
+  assert.equal(set.recipients[0].params['parcelId'], PARCEL)
+  assert.equal(set.recipients[0].params['slot'], '2026-09-01 18:00 UTC')
+  // The amount is deliberately absent from the params: the divisor that turns `priceWei` into
+  // Sparks lives in micro-tessera and is exported by nothing, so a figure here would be a second
+  // copy of a denomination. Pinned, so restoring it is a decision rather than a reflex.
+  assert.equal(set.recipients[0].params['priceWei'], undefined)
+  assert.equal(set.recipients[0].subjectUrn, `cf:tessera:parcel:${PARCEL}`)
+  assert.equal(set.recipients[0].dedupeKey, `tessera.venue_booked:${BOOKING}`)
+})
+
+test("yesterday's venue payload, with no owner, is no_recipient rather than the booker", () => {
+  // `{ bookingId, parcelId, slot, bookedBy, priceWei, reservationId }` — what the VENUE_BOOKED emit
+  // sent before tessera 33ead39, and the shape a replayed or relayed old event still has.
+  assert.deepEqual(RULES['tessera.venue.booked']?.recipients(bookedEvent(undefined)), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
+})
+
+test('two bookings on one Venue are two notifications, not one deduped into silence', () => {
+  const first = RULES['tessera.venue.booked']?.recipients(bookedEvent(`user:${ALICE}`, BOOKING, SLOT))
+  const second = RULES['tessera.venue.booked']?.recipients(
+    bookedEvent(`user:${ALICE}`, '00000000-0000-4000-8000-000000000001', '2026-09-02T18:00:00.000Z'),
+  )
+  if (first?.kind !== 'recipients' || second?.kind !== 'recipients') {
+    assert.fail('expected recipients')
+    return
+  }
+  // Both are keyed by the same parcel — that is what the registry says `tessera.venue.booked` is
+  // keyed by — so a parcel-keyed dedupe would collapse a fully booked calendar into one alert.
+  assert.notEqual(first.recipients[0].dedupeKey, second.recipients[0].dedupeKey)
+  // The degraded key, when a producer drops `bookingId`, is parcel-and-slot rather than the parcel
+  // alone: that pair is what `tessera_one_open_booking` uses to identify an open booking, so two
+  // slots still produce two keys even with the id gone.
+  const noId = RULES['tessera.venue.booked']?.recipients(bookedEvent(`user:${ALICE}`, ''))
+  const noIdOther = RULES['tessera.venue.booked']?.recipients(
+    bookedEvent(`user:${ALICE}`, '', '2026-09-02T18:00:00.000Z'),
+  )
+  if (noId?.kind !== 'recipients' || noIdOther?.kind !== 'recipients') {
+    assert.fail('expected recipients')
+    return
+  }
+  assert.equal(noId.recipients[0].dedupeKey, `tessera.venue_booked:${PARCEL}:${SLOT}`)
+  assert.notEqual(noId.recipients[0].dedupeKey, noIdOther.recipients[0].dedupeKey)
+})
+
 /**
- * The four tessera topics with no rule, and the assertion that they are DECIDED rather than missed.
+ * The priority argument, pinned so that raising either one is an edit to this test.
+ *
+ * `exactly the events 04-domain-model §10.3 names are critical` already fails on a sixth critical
+ * topic, but it fails with a diff of a topic list, which reads as bookkeeping. This says the
+ * reason: a booking's fee is escrowed in a ledger reservation `bookings_open_holds_money` makes
+ * non-optional, so nothing is lost if a preference silences it — which is exactly the test the
+ * failed-withdrawal rule applied to reach the opposite answer for HELD funds, where no other topic
+ * in the estate would ever tell the user. Every unnecessary critical is a preference page that
+ * stops working, and these two are the cases for keeping that set at five.
+ */
+test('the two tessera owner notifications are high, and neither is critical', () => {
+  for (const topic of ['tessera.parcel.fallowed', 'tessera.venue.booked']) {
+    const rule = RULES[topic]
+    assert.ok(rule, `${topic} has no rule`)
+    if (!rule) continue
+    assert.equal(rule.category, 'ownership')
+    for (const outcome of outcomesOf(rule)) {
+      assert.equal(outcome.priority, 'high', `${topic}: say why in the rule before changing this`)
+      assert.notEqual(outcome.priority, 'critical', `${topic} would ignore every preference`)
+    }
+  }
+  // And `high` is above the default, so a reader who has not touched their preferences gets both:
+  // the news is that somebody else acted on their property, which they cannot have been watching.
+  assert.ok(PRIORITY_RANK['high'] > PRIORITY_RANK['normal'])
+})
+
+/**
+ * The words, rendered — because a template id is an identifier a refactor can move while the
+ * sentence stays wrong, and because both of these say something the code has to keep true.
+ */
+test('the contested notification never offers a defence the world does not have', () => {
+  const rule = RULES['tessera.parcel.fallowed']
+  const set = rule?.recipients(fallowedEvent(`user:${ALICE}`))
+  if (!rule || set?.kind !== 'recipients') {
+    assert.fail('expected recipients')
+    return
+  }
+  const rendered = renderTemplate(
+    templateFor(rule.templateId)!,
+    set.recipients[0].params,
+    DEFAULT_LOCALE,
+    'https://app.cloudsforge.test',
+  )
+  assert.deepEqual(rendered.missing, [], 'a gap where the parcel or the ward should be')
+  const text = `${rendered.subject}\n${rendered.body}`
+  assert.match(text, new RegExp(PARCEL), 'which parcel — a reader may hold dozens')
+  // Banking moves `banked_until`, but `resolveContest` never re-reads the window — tessera's
+  // `parcel.settle` handler says so: "a contest that exists is one the window already permitted".
+  // Nothing writes `status = 'withdrawn'`. So the body may say banking protects OTHER land and must
+  // not say it saves this parcel, which would be a defence offered to somebody who has none.
+  assert.doesNotMatch(
+    text,
+    /bank (it|this parcel)|to keep it|to save it|withdraw the contest|dispute/i,
+    'the reader was told to defend a contest that nothing in micro-tessera can withdraw',
+  )
+  // It must still say what is NOT lost, or "your land is being taken" is the whole of what a reader
+  // who did nothing learns.
+  assert.match(text, /still yours/)
+})
+
+test('the venue notification says the fee is held, and never states an amount it cannot denominate', () => {
+  const rule = RULES['tessera.venue.booked']
+  const set = rule?.recipients(bookedEvent(`user:${ALICE}`))
+  if (!rule || set?.kind !== 'recipients') {
+    assert.fail('expected recipients')
+    return
+  }
+  const rendered = renderTemplate(
+    templateFor(rule.templateId)!,
+    set.recipients[0].params,
+    DEFAULT_LOCALE,
+    'https://app.cloudsforge.test',
+  )
+  assert.deepEqual(rendered.missing, [])
+  const text = `${rendered.subject}\n${rendered.body}`
+  assert.match(text, /2026-09-01 18:00 UTC/, 'the date somebody else put in their calendar')
+  assert.match(text, /escrowed/)
+  // The raw wei figure must never reach a sentence. It is a whole multiple of 10^12 and reads as
+  // either a bug or a fortune; the divisor that would fix it is micro-tessera's and is exported by
+  // no shared package. The parcel id is removed first because it is a uuid whose groups are long
+  // digit runs in this fixture — a regex that catches its own identifiers proves nothing.
+  assert.doesNotMatch(text, /5000000000000/, 'the payload priceWei was rendered at a person')
+  assert.doesNotMatch(
+    text.split(PARCEL).join('<parcel>'),
+    /\d{10,}/,
+    'a wei integer was rendered at a person',
+  )
+  // And it must not promise a payout: nothing in micro-tessera moves a booking to `settled` yet.
+  assert.doesNotMatch(text, /paid to you|in your balance now|has been paid/i)
+})
+
+/**
+ * The two tessera topics with no rule, and the assertion that they are DECIDED rather than missed.
  *
  * `unmappedRegistryTopics()` already fails on a registered topic that is neither mapped nor
- * recorded, so this adds the half that check cannot see: that each of the four is in exactly one
- * of the two tables, never both, and that the two deferrals are the two whose envelopes name only
- * the actor. Naming them here is what makes a future rule for one of them a deliberate edit.
+ * recorded, so this adds the half that check cannot see: that each is in exactly one of the two
+ * tables, never both. Naming them here is what makes a future rule for one of them a deliberate
+ * edit.
+ *
+ * **There were four, and the other two were DEFERRALS rather than decisions.** That distinction was
+ * written into this test because it is the one a reader collapses: `tessera.parcel.fallowed` and
+ * `tessera.venue.booked` had no rule not because nobody needed telling but because the envelope did
+ * not name the person who did. tessera 33ead39 added `ownerSubject` to both, so both are rules now
+ * and both had to leave this list — a topic that is mapped may not also be recorded. The two below
+ * are the ones that were always decisions, and neither has moved.
  */
-test('the four tessera topics with no rule are each recorded, and never both mapped and recorded', () => {
-  for (const topic of [
-    'tessera.parcel.claimed',
-    'tessera.ward.opened',
-    'tessera.parcel.fallowed',
-    'tessera.venue.booked',
-  ]) {
+test('the two tessera topics with no rule are each recorded, and never both mapped and recorded', () => {
+  for (const topic of ['tessera.parcel.claimed', 'tessera.ward.opened']) {
     assert.equal(hasRule(topic), false, `${topic} is recorded as not notifying AND mapped`)
     assert.ok(Object.hasOwn(NON_NOTIFYING_TOPICS, topic), `${topic} has no rule and no reason`)
     assert.equal(isKnownTopic(topic), true, `${topic} must still be accepted at /ingest`)
+  }
+  // And the two that closed are mapped in exactly one table, from the other direction: a rule, and
+  // no `NON_NOTIFYING_TOPICS` entry left behind saying the envelope names nobody.
+  for (const topic of ['tessera.parcel.fallowed', 'tessera.venue.booked']) {
+    assert.equal(hasRule(topic), true, `${topic} named its owner; the rule it was owed is missing`)
+    assert.equal(
+      Object.hasOwn(NON_NOTIFYING_TOPICS, topic),
+      false,
+      `${topic} is both mapped and recorded as not notifying — the coverage table can only mean one`,
+    )
+    assert.equal(isKnownTopic(topic), true, `${topic} must be accepted at /ingest`)
   }
   // And all seven are registered, so none of them is riding the quarantine.
   for (const topic of [

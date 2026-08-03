@@ -376,10 +376,16 @@ export const TEMPLATES = Object.freeze({
 
   /* ------------------------------------------------------------------ tessera */
 
-  // All three are `ownership`, and none of them is a confirmation of a thing the reader just did.
-  // That is the test every tessera topic was put to: five of the seven registered topics either
-  // announce the reader's own deliberate act or name nobody at all, and they have no template here
-  // because they have no rule — see `NON_NOTIFYING_TOPICS` and `UNPRODUCED_NOTIFICATIONS`.
+  // All five are `ownership`, and none of them is a confirmation of a thing the reader just did.
+  // That is the test every tessera topic was put to: the two of the seven with no template here
+  // announce the reader's own deliberate act or name nobody at all, and they have no rule either —
+  // see `NON_NOTIFYING_TOPICS`.
+  //
+  // The last two arrived together and are the reason that count moved from three to five: their
+  // topics were deferred, not declined, because the payloads named the challenger and the booker
+  // rather than the owner. tessera `33ead39` added `ownerSubject` to both. Both of these templates
+  // are therefore written for a reader who is NOT the actor and did not ask for the news, which is
+  // why neither opens with a congratulation and both say what the reader may do next.
 
   'tessera.object_fired': Object.freeze({
     id: 'tessera.object_fired',
@@ -415,6 +421,57 @@ export const TEMPLATES = Object.freeze({
     text: en(
       'A parcel of yours changed hands after a contest',
       'Parcel {{parcelId}} in ward {{wardId}} is no longer yours.\n\nIt had gone fallow — no visitor and no edit for 90 days — and was contested 30 days after that. The contest resolved in the challenger\'s favour.\n\nA Homestead can never be contested. Everything you built on the parcel is still yours and still in your objects.',
+    ),
+  }),
+  /**
+   * The warning `tessera.parcel_lost` is the aftermath of, and the harder of the two to write.
+   *
+   * This is bad news about property told to somebody who did nothing, so the body has to answer
+   * three questions in order: what has happened, why it was allowed to happen, and what — if
+   * anything — is still theirs to do. The third is where a template of this kind normally lies.
+   *
+   * **It does not tell the reader to bank this parcel, and that omission is deliberate.** Banking
+   * moves `banked_until` and therefore `tessera_contestable_at`, but `resolveContest` does not
+   * re-read the window — `tessera/src/jobs.ts`, the `parcel.settle` handler, says why in as many
+   * words: "a contest that exists is one the window already permitted". Nothing withdraws an open
+   * contest; `contests_status_known` allows `withdrawn` and no code writes it. So "bank it to save
+   * it" would be a defence that does not exist, offered to somebody who would then believe their
+   * ground was safe. Banking appears here only as what keeps their OTHER land out of this, which
+   * is true.
+   */
+  'tessera.parcel_contested': Object.freeze({
+    id: 'tessera.parcel_contested',
+    category: 'ownership',
+    params: ['parcelId', 'wardId'],
+    path: '/tessera/parcels',
+    text: en(
+      'Someone has opened a contest on a parcel of yours',
+      'Parcel {{parcelId}} in ward {{wardId}} has been contested. Anyone may claim ground that has gone quiet, and this parcel reached that point: 90 days with no visitor and no edit, and 30 days more after that.\n\nIf the contest is resolved the parcel changes hands, and we will tell you when it is. Nothing you made goes with it — everything you built on the parcel is still yours and still in your objects.\n\nYour other land is on the same clock. A visitor or an edit restarts it, and banking a parcel extends it to 270 days — free, once a year. A Homestead is never fallow and never contestable, whatever happens to the rest.',
+    ),
+  }),
+  /**
+   * Money owed, and an hour of the reader's calendar spent by a stranger.
+   *
+   * The amount is not in these words and `catalogue.ts`'s rule carries the full argument: the
+   * payload's `priceWei` is a count of the smallest unit, and the divisor that turns it into the
+   * Sparks a person would recognise lives in `micro-tessera` and is exported by no shared package.
+   * A second copy of a denomination that drifts states the wrong amount of money; the raw integer
+   * reads as a bug. Neither is better than pointing at the parcel, where the figure is shown
+   * beside its unit.
+   *
+   * It says the fee is HELD rather than paid, and stops there, because that is all the estate can
+   * prove today: `bookings_open_holds_money` makes an open booking without a ledger reservation
+   * unrepresentable, and nothing in `micro-tessera` moves a booking to `settled` yet. Promising a
+   * payout date this service cannot see is the withdrawal-refund error in a smaller currency.
+   */
+  'tessera.venue_booked': Object.freeze({
+    id: 'tessera.venue_booked',
+    category: 'ownership',
+    params: ['parcelId', 'slot'],
+    path: '/tessera/parcels',
+    text: en(
+      'Someone has booked your Venue',
+      'Your Venue at parcel {{parcelId}} is booked for {{slot}}.\n\nThe fee is already escrowed: a booking cannot hold a slot on your calendar without a ledger reservation holding the money behind it, so this is not a promise to pay you — it is money set aside. The amount is on the parcel, shown with its unit.\n\nThe slot is yours to be ready for. Nothing else can take it while this booking stands.',
     ),
   }),
 
