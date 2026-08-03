@@ -18,11 +18,13 @@ import {
   AWAITING_REGISTRATION,
   UNPRODUCED_NOTIFICATIONS,
   adoptedProposals,
+  contradictedGaps,
+  inconsistentGaps,
   malformedProposals,
-  staleGaps,
   unmappedTopics,
   unregisteredRuleTopics,
 } from './topics.ts'
+import { unregisteredEvent, ALICE } from './testsupport.ts'
 
 test('every rule maps a topic the estate has a name for', () => {
   // The direction that was missing. A rule keyed to a topic no producer can legally emit is a
@@ -69,6 +71,11 @@ test('every pending proposal carries a spec that could be pasted into the regist
  * This is the regression pin. Re-adding any of these names is re-adding the defect, because the
  * name is the thing that was wrong — the notification each one described is still wanted, and the
  * repair is to register what the producer really sends and key a rule to that.
+ *
+ * Four of the eleven have since had that repair: `trade.bot.stopped` is now a rule on
+ * `trade.bot.paused`, `devplatform.apikey.created` and `.revoked` are rules on
+ * `devplatform.key.issued` and `.revoked`, and `identity.password.changed` rides
+ * `identity.session.revoked`. The guessed names below stay wrong and stay refused.
  */
 test('the rules for topics nobody emits stay deleted', () => {
   for (const topic of [
@@ -92,7 +99,7 @@ test('the rules for topics nobody emits stay deleted', () => {
 })
 
 test('every unproduced notification names the producer that decided it', () => {
-  assert.ok(UNPRODUCED_NOTIFICATIONS.length >= 10)
+  assert.ok(UNPRODUCED_NOTIFICATIONS.length >= 5, 'the records are being read, not an empty array')
   for (const gap of UNPRODUCED_NOTIFICATIONS) {
     assert.ok(gap.requirement.length > 5, `${gap.guessedTopic}: name the AD-08 requirement`)
     assert.equal(hasRule(gap.guessedTopic), false, `${gap.guessedTopic} is recorded AND mapped`)
@@ -100,20 +107,147 @@ test('every unproduced notification names the producer that decided it', () => {
       gap.evidence.length > 80,
       `${gap.guessedTopic}: cite the source that proves what the producer emits — under 80 characters is a guess`,
     )
-    // A gap whose `emits` is a topic must spell it as a legal topic name, or the next reader
-    // greps for a string that cannot exist.
-    for (const emitted of gap.emits?.split(', ') ?? []) {
-      assert.match(emitted, /^[a-z0-9_]+\.[a-z0-9_]+\.[a-z0-9_]+$/, `${gap.guessedTopic}: ${emitted}`)
+    // A gap whose `emits` is a topic must spell it as ONE legal topic name. A list would be prose,
+    // and micro-org's estate check matches this field as a literal — the record that spelled three
+    // topics into it ('trade.bot.created, trade.bot.started, trade.bot.paused') was invisible to
+    // that check for exactly this reason.
+    if (gap.emits !== null) {
+      assert.match(gap.emits, /^[a-z0-9_]+\.[a-z0-9_]+\.[a-z0-9_]+$/, `${gap.guessedTopic}: ${gap.emits}`)
+    }
+    // An owner, or the one reason there is nothing to own.
+    if (gap.blockedBy === 'other-channel') {
+      assert.equal(gap.owner, null, `${gap.guessedTopic}: already delivered; nothing to change`)
+    } else {
+      assert.match(gap.owner ?? '', /^micro-[a-z-]+$/, `${gap.guessedTopic}: name the repository that closes it`)
     }
   }
 })
 
-test('a recorded gap disappears once its real topic is registered', () => {
+test('a record cannot claim a reason its own fields contradict', () => {
   assert.deepEqual(
-    staleGaps(),
+    inconsistentGaps(),
     [],
-    'contracts now names the topic these producers emit — write the rule and delete the record',
+    "a record's blockedBy disagrees with its emits/owner — see UnproducedNotification for what each reason implies",
   )
+})
+
+/**
+ * The check that replaced `staleGaps()`, and the only staleness this checkout can prove.
+ *
+ * The old one asked whether the shared registry NAMED the topic a producer emits. It never fired
+ * and never could have: every record it watched described a topic a live producer emits and no
+ * registry names, which is the state it read as "still true". Five records sat here for weeks
+ * saying a notification was impossible while trade, market and devplatform were emitting the exact
+ * names this service had written down.
+ *
+ * This asks the question notify owns instead: does this service's own rule table contradict the
+ * record? Writing the rule now deletes the record, which is the failure mode the five had. The
+ * cross-repository half — is a producer emitting it at all — belongs to micro-org's
+ * tools/estate-topics.mjs, which is the only checkout that can see both halves, and is what found
+ * these. Neither half pretends to do the other's job.
+ */
+test('a recorded gap disappears once this service writes the rule it said was impossible', () => {
+  assert.deepEqual(
+    contradictedGaps(),
+    [],
+    'a rule exists for the topic this record says cannot be notified on — delete the record',
+  )
+})
+
+/**
+ * The three rules the five stale records were hiding, driven with the producer's REAL payload.
+ *
+ * A rule that resolves no recipient is as dead as no rule, and two of the five turned out to be
+ * exactly that — their records stayed, with the reason. These three must therefore be shown to
+ * address somebody from the shape the producer actually emits, copied field for field from the
+ * emit site named in each quarantine entry. Asserting `hasRule` alone would repeat the mistake the
+ * whole file exists to stop: counting a rule as coverage without ever running it.
+ */
+test('each newly live rule addresses a real recipient from the payload its producer really sends', () => {
+  const cases = [
+    {
+      // trade/src/bots.ts:614 — payload { botId }, actor the bot's OWNER.
+      topic: 'trade.bot.paused',
+      payload: { botId: 'bot-1' },
+      actor: `user:${ALICE}`,
+      dedupeKey: 'trading.bot_paused:bot-1',
+    },
+    {
+      // devplatform/src/apikeys.ts:272 — the display and the project, never the key, and the actor
+      // is the caller: `user:<id>` for a session, which under a stolen session IS the victim's id.
+      topic: 'devplatform.key.issued',
+      payload: { keyId: 'key-1', projectId: 'p-1', environment: 'live', display: 'cfk_live_abc', scopes: [] },
+      actor: `user:${ALICE}`,
+      dedupeKey: 'api.key_issued:key-1',
+    },
+    {
+      topic: 'devplatform.key.revoked',
+      payload: { keyId: 'key-1', projectId: 'p-1', environment: 'live', display: 'cfk_live_abc', lookupId: 'abc', reason: '' },
+      actor: `user:${ALICE}`,
+      dedupeKey: 'api.key_revoked:key-1',
+    },
+  ] as const
+
+  for (const each of cases) {
+    assert.equal(hasRule(each.topic), true, `${each.topic} has no rule`)
+    // Unregistered on purpose: each is quarantined with the spec that registers it, and `events.ts`
+    // accepts an unregistered topic exactly when a rule exists.
+    assert.equal(isRegisteredTopic(each.topic), false, `${each.topic} is registered — delete the quarantine entry`)
+    assert.ok(Object.hasOwn(AWAITING_REGISTRATION, each.topic), `${each.topic} is not quarantined`)
+
+    const event = unregisteredEvent(each.topic, 'k-1', { ...each.payload }, { actor: each.actor })
+    const set = RULES[each.topic]?.recipients(event)
+    assert.equal(set?.kind, 'recipients', `${each.topic} resolves nobody from what its producer sends`)
+    if (set?.kind !== 'recipients') continue
+    assert.equal(set.recipients.length, 1)
+    assert.equal(set.recipients[0].userId, ALICE)
+    assert.equal(set.recipients[0].dedupeKey, each.dedupeKey, 'keyed on the domain id, never on the event id')
+  }
+
+  // And an envelope with no user anywhere is no_recipient rather than a guess — the `key:<display>`
+  // and `system:identity` actors devplatform also emits under (server.ts:965, :1527).
+  const anonymous = unregisteredEvent(
+    'devplatform.key.revoked',
+    'k-1',
+    { keyId: 'key-1', projectId: 'p-1' },
+    { actor: 'service:devplatform' },
+  )
+  assert.deepEqual(RULES['devplatform.key.revoked']?.recipients(anonymous), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
+})
+
+/**
+ * The two that did NOT become rules, and why the difference is not a judgement call.
+ *
+ * Both topics are emitted by a live producer, which is what micro-org's check saw. Neither envelope
+ * names anybody this service could notify: settlement's failure is wallet's narrow handover with no
+ * userId and no actor, and market's offer names the OFFERER while the notification is for the
+ * SELLER. A rule on either would answer no_recipient for ever, or — worse for market — address the
+ * wrong person. This pins that they stay recorded rather than quietly acquiring a rule that reports
+ * coverage it does not have.
+ */
+test('a topic whose envelope names nobody stays a record, not a rule', () => {
+  for (const topic of ['settlement.outbound.failed', 'market.offer.made']) {
+    assert.equal(hasRule(topic), false, `${topic} has a rule and its envelope names no recipient`)
+    const gap = UNPRODUCED_NOTIFICATIONS.find((each) => each.emits === topic)
+    assert.ok(gap, `${topic} is neither ruled nor recorded`)
+    assert.equal(gap?.blockedBy, 'no-subject')
+    assert.match(gap?.owner ?? '', /^micro-(settlement|market)$/)
+  }
+  // settlement.outbound.failed was registered by contracts while this change was being written, so
+  // it needs the OTHER half of the coverage rule as well: a registered topic must be mapped or have
+  // a written reason. Its reason has to name the requirement that is still owed, or registering it
+  // would look like closing it.
+  assert.equal(isKnownTopic('settlement.outbound.failed'), true)
+  assert.match(
+    NON_NOTIFYING_TOPICS['settlement.outbound.failed'] ?? '',
+    /withdrawal transaction failed outright/,
+    'the non-notifying reason must point at the notification that is still missing',
+  )
+  // market.offer.made is not registered, so it is not accepted at /ingest either.
+  assert.equal(isKnownTopic('market.offer.made'), false)
 })
 
 /**

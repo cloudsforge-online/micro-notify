@@ -80,6 +80,13 @@ test('every notification AD-08 names is either live or a recorded gap', () => {
     'community.proposal.opened',
     'community.proposal.executed',
     'community.vote.cast',
+    // trading-bot event, and the two API-key events. All three were RECORDED as impossible while
+    // their producers were emitting them under the names this service had already written down —
+    // see topics.ts. They are keyed to unregistered topics on purpose, each quarantined with the
+    // spec that registers it, which is the state AWAITING_REGISTRATION exists to make visible.
+    'trade.bot.paused',
+    'devplatform.key.issued',
+    'devplatform.key.revoked',
   ]
   for (const topic of live) {
     assert.ok(ruleFor(topic), `AD-08 requires a rule for ${topic}`)
@@ -93,12 +100,13 @@ test('every notification AD-08 names is either live or a recorded gap', () => {
   for (const requirement of [
     'risk limit reached',
     'deposit detected, before confirmation',
+    // Both of these name a topic a live producer emits — which is why they LOOK like the three that
+    // just became rules, and are not. Neither envelope carries anybody this service could address:
+    // settlement's failure is wallet's narrow handover with no userId and no actor, and market's
+    // offer names the offerer while the notification is for the seller. `blockedBy: 'no-subject'`.
     'withdrawal transaction failed outright',
-    'trading-bot event',
     'marketplace offer received',
     'auction ended',
-    'API key created',
-    'API key revoked',
     'service incident',
   ]) {
     assert.ok(recorded.has(requirement), `AD-08 names "${requirement}" and nothing here accounts for it`)

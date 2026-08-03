@@ -207,6 +207,41 @@ export const TEMPLATES = Object.freeze({
       '{{tokenName}} is deployed on {{chain}} at {{address}}.',
     ),
   }),
+  'trading.bot_paused': Object.freeze({
+    id: 'trading.bot_paused',
+    category: 'trading',
+    params: ['botLabel', 'at'],
+    path: '/trade/bots',
+    // `paused` is terminal-ish and it does NOT flatten the position — trade/src/bots.ts pauses with
+    // the position still open, marked to market from whenever the bot last ticked. So the sentence
+    // has to say that the money is still exposed; "your bot stopped" on its own would read as safe.
+    text: en(
+      'Your trading bot stopped',
+      '{{botLabel}} stopped trading at {{at}}.\n\nPausing does not close its position — anything the bot was holding is still open and still moving with the market. Review it and close it yourself if you want to be out.',
+    ),
+  }),
+  'api.key_issued': Object.freeze({
+    id: 'api.key_issued',
+    category: 'api',
+    params: ['keyDisplay', 'project', 'at'],
+    path: '/developers/keys',
+    // The DISPLAY (`cfk_live_…`), never the key. devplatform's own emit says so at apikeys.ts:272,
+    // and the display is the value an operator finds in a log line and revokes by.
+    text: en(
+      'A new API key was created',
+      'API key {{keyDisplay}} was created for project {{project}} at {{at}}.\n\nAn API key acts as you. If this was not you, revoke it now and change your password.',
+    ),
+  }),
+  'api.key_revoked': Object.freeze({
+    id: 'api.key_revoked',
+    category: 'api',
+    params: ['keyDisplay', 'project', 'at', 'reason'],
+    path: '/developers/keys',
+    text: en(
+      'An API key was revoked',
+      'API key {{keyDisplay}} for project {{project}} was revoked at {{at}} — {{reason}}.\n\nAnything using it has stopped working. If this was not you, someone else can reach your project: change your password and review the remaining keys.',
+    ),
+  }),
   'reward.granted': Object.freeze({
     id: 'reward.granted',
     category: 'reward',

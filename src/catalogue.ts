@@ -465,9 +465,87 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
-  /* --------------------------------------------------------- products */
+  /* --------------------------------------------------------- products
+   *
+   * The three rules below are keyed to topics the shared registry does not name YET, and that is a
+   * declared state rather than an accident: each is quarantined in `topics.ts` with the exact
+   * `TopicSpec` that registers it and the emit site that proves the producer sends it, and
+   * `topics.test.ts` fails the moment contracts adopts one and the quarantine entry is not deleted.
+   * `events.ts` accepts a well-formed envelope on an unregistered topic precisely when a rule
+   * exists, which is what makes them live today rather than one contracts release from now.
+   *
+   * Each replaces a RECORD that said the notification was impossible. It was not: the producer had
+   * been emitting all along under the name notify itself had written down. See the header of
+   * `topics.ts` for why a record could say that and no check inside this repository could see it.
+   */
 
+  'trade.bot.paused': Object.freeze({
+    category: 'trading',
+    priority: 'high',
+    templateId: 'trading.bot_paused',
+    why: 'A bot stopping is the state its owner most needs to hear about, and pausing does not close the position — trade/src/bots.ts:610 leaves it open and marked to market from the last tick, so silence here is a user who believes they are flat.',
+    recipients: forUser(
+      // Keyed on the BOT, not the event: a bot paused and resumed and paused again in a minute is
+      // one piece of news, and `event.id` would dedupe nothing.
+      (event) => `trading.bot_paused:${str(event.payload, ['bot_id', 'botId'], event.key)}`,
+      (event) => ({
+        botLabel: str(event.payload, ['bot_name', 'botName', 'name', 'bot_id', 'botId'], 'Your trading bot'),
+        at: formatInstant(event.occurredAt),
+      }),
+      (event) => `cf:trade:bot:${str(event.payload, ['bot_id', 'botId'], event.key)}`,
+    ),
+  }),
 
+  /*
+   * The two API-key rules address the ENVELOPE ACTOR, and that is the whole of why they work.
+   *
+   * The payload names the key and the project, never a user (devplatform/src/apikeys.ts:272, :357),
+   * and notify holds no project-membership table it could look an owner up in. The actor is
+   * `user:<id>` for a caller holding a session (devplatform/src/server.ts:669) — and in the case
+   * these rules exist for, a stolen session, that id IS the victim's, because the attacker is acting
+   * as them. So the notification lands in the real owner's inbox, which is exactly the
+   * `identity.session.created` model.
+   *
+   * When the actor is `key:<display>` (a key minting a key) or `system:identity` (the erasure path
+   * at devplatform/src/server.ts:1527) `forUser` answers `no_recipient` rather than guessing. That
+   * is a producer to fix, and it is visible as one; the alternative is telling the wrong person that
+   * their credentials changed.
+   */
+
+  'devplatform.key.issued': Object.freeze({
+    category: 'api',
+    priority: 'high',
+    templateId: 'api.key_issued',
+    why: 'An API key acts as the user, without a password and without a second factor, so a key created by somebody else is the first thing a compromise looks like — and nothing tells the account holder today.',
+    recipients: forUser(
+      (event) => `api.key_issued:${str(event.payload, ['key_id', 'keyId'], event.key)}`,
+      (event) => ({
+        // The display (`cfk_live_…`), which is safe in a log and is what a revocation quotes. The
+        // key itself never leaves devplatform and must never appear here.
+        keyDisplay: str(event.payload, ['display', 'key_display', 'keyDisplay'], 'a new key'),
+        project: str(event.payload, ['project_id', 'projectId'], 'your project'),
+        at: formatInstant(event.occurredAt),
+      }),
+      (event) => `cf:devplatform:api_key:${str(event.payload, ['key_id', 'keyId'], event.key)}`,
+    ),
+  }),
+
+  'devplatform.key.revoked': Object.freeze({
+    category: 'api',
+    priority: 'high',
+    templateId: 'api.key_revoked',
+    why: 'A revocation the owner did not make is somebody else inside their project, and a revocation they DID make silently breaks every integration using it — both halves are worth an interruption.',
+    recipients: forUser(
+      (event) => `api.key_revoked:${str(event.payload, ['key_id', 'keyId'], event.key)}`,
+      (event) => ({
+        keyDisplay: str(event.payload, ['display', 'key_display', 'keyDisplay'], 'a key'),
+        project: str(event.payload, ['project_id', 'projectId'], 'your project'),
+        at: formatInstant(event.occurredAt),
+        reason: str(event.payload, ['reason'], 'no reason was recorded'),
+      }),
+      (event) => `cf:devplatform:api_key:${str(event.payload, ['key_id', 'keyId'], event.key)}`,
+    ),
+  }),
 
   'market.listing.sold': Object.freeze({
     category: 'market',
@@ -763,6 +841,16 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
     'A world event whose personal half already notifies: every victor hears through spire.captured, with the members carried on that payload. Telling every player their world ended is an announcement, not a notification — the broadcast channel is the honest one, and worlds consumes this event for heraldry entitlements, not people.',
   'ledger.reconciliation.completed':
     'Custody total against indexer-observed total. It concerns operators and freezes withdrawals; no individual user is its subject.',
+  // ── settlement's handover topics, registered after the withdrawal ones ─────────────────────
+  // All three are settlement talking to wallet or to reconciliation, not to a person. The two
+  // user-facing withdrawal outcomes — completed and stuck — already have rules above, and the
+  // failure that has no user-facing twin is recorded in topics.ts rather than notified on here.
+  'settlement.outbound.confirmed':
+    "wallet's own narrow name for the same movement settlement.withdrawal.completed announces (settlement/src/withdrawals.ts:441 and :451 emit both from one function). It exists to release the reservation at wallet/src/server.ts:859 and carries a withdrawal id, a hash and a timestamp. A rule here as well would tell one user their withdrawal arrived twice.",
+  'settlement.outbound.failed':
+    'The same handover for the other outcome, and the one entry in this table that records a notification the estate still owes somebody. Its envelope names nobody notify could address — `payload: { withdrawalId, reason, refundable }` at settlement/src/withdrawals.ts:482, and `failedEvents` sets no actor — so a rule on it would answer no_recipient for every event for ever. `refundable` is for wallet, which reads it at server.ts:872 to decide whether the money goes back. The user-facing twin does not exist: completed and stuck both carry userId and are broad, and there is no settlement.withdrawal.failed. That gap is UNPRODUCED_NOTIFICATIONS’ "withdrawal transaction failed outright", owned by micro-settlement.',
+  'settlement.sweep.completed':
+    "A deposit address emptied into the pinned treasury. No user balance changes — wallet credited the deposit when it confirmed, long before the sweep — so there is nothing here a person could act on or would recognise. It exists for reconciliation, which is the one movement no other topic reports, and it is keyed by the sweep source rather than by anybody.",
 })
 
 /**
