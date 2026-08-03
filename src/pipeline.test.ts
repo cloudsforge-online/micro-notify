@@ -37,6 +37,7 @@ import {
   enabled,
   migrateTestDb,
   openDb,
+  counterValue,
   registeredEvent,
   resetNotify,
   skip,
@@ -601,5 +602,164 @@ describe('pipeline', { skip }, () => {
 
     const rows = await sql<Array<{ n: number }>>`select count(*)::int as n from notifications`
     assert.equal(rows[0]?.n, 2)
+  })
+
+  /* ---------------------------------------------------------------- the failed withdrawal
+   *
+   * The whole path for `settlement.outbound.failed`, from settlement's real payload to the words
+   * a channel is handed, because every intermediate step has somewhere for the fact to be lost:
+   * the rule picks the recipient, `outcomeOf` picks the priority and template, the database's two
+   * §10.3 CHECK constraints decide whether a critical row may exist at all, and the renderer
+   * produces the sentence. A unit test on the rule alone proves none of the last three.
+   *
+   * `WITHDRAWAL` is a uuid that is NOT a user's, because it is the envelope key for this topic and
+   * a key fallback would be well-formed and wrong.
+   */
+
+  const WITHDRAWAL = '44444444-4444-4444-8444-444444444444'
+
+  function failure(payload: Record<string, unknown>) {
+    // `service:settlement` is what settlement's relay stamps: `failedEvents` names no actor, so
+    // there is no actor route to a person and the payload is the only one.
+    return registeredEvent('settlement.outbound.failed', WITHDRAWAL, payload, {
+      actor: 'service:settlement',
+    })
+  }
+
+  /**
+   * Held money is critical, so it survives a user who has muted everything.
+   *
+   * This is the §10.3 invariant applied to the case it was not written for, and the reason it has
+   * to hold here is specific: wallet's non-refundable branch moves the row to `stuck` and emits
+   * nothing (`wallet/src/withdrawals.ts:592`), so this notification is the only account the owner
+   * of that money will ever get. A preference that could silence it would turn "your withdrawal
+   * failed and your funds are held" into silence.
+   */
+  test('a failed withdrawal with the money held reaches a user who has muted everything', async () => {
+    const rig = testRig(sql)
+    await upsertPreferences(sql, ALICE, everythingDisabled())
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+
+    const outcome = await ingestEvent(
+      rig.deps,
+      failure({ withdrawalId: WITHDRAWAL, userId: ALICE, reason: 'the chain rejected it', refundable: false }),
+    )
+    assert.equal(outcome.kind, 'processed')
+
+    const rows = await sql<
+      Array<{ user_id: string; priority: string; template_id: string; channel_count: number; suppressed_reason: string | null }>
+    >`select user_id, priority, template_id, channel_count, suppressed_reason from notifications`
+    assert.equal(rows.length, 1)
+    // The right person: settlement's userId, never the withdrawal id the envelope is keyed by.
+    assert.equal(rows[0]?.user_id, ALICE)
+    assert.notEqual(rows[0]?.user_id, WITHDRAWAL)
+    assert.equal(rows[0]?.priority, 'critical')
+    assert.equal(rows[0]?.template_id, 'withdrawal.failed_held')
+    assert.equal(rows[0]?.suppressed_reason, null, '04-domain-model §10.3')
+    assert.ok((rows[0]?.channel_count ?? 0) >= 1)
+
+    await dispatchDue(rig.deps, 50)
+    const sent = [...rig.adapters.in_app.sent, ...rig.adapters.email.sent]
+    assert.equal(sent.length, 2, 'in-app and email, with every preference switched off')
+    for (const { message } of sent) {
+      assert.equal(message.userId, ALICE)
+      const text = `${message.subject}\n${message.body}`
+      assert.match(text, /still held/)
+      assert.doesNotMatch(
+        text,
+        /coming back|being returned to your balance/,
+        'the expensive error, delivered: their money is held and they have been told it is back',
+      )
+    }
+  })
+
+  test('a refundable failure says the money is coming back, and is muteable', async () => {
+    const rig = testRig(sql)
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+
+    await ingestEvent(
+      rig.deps,
+      failure({ withdrawalId: WITHDRAWAL, userId: ALICE, reason: 'the chain rejected it', refundable: true }),
+    )
+    const rows = await sql<Array<{ user_id: string; priority: string; template_id: string }>>`
+      select user_id, priority, template_id from notifications
+    `
+    assert.equal(rows[0]?.user_id, ALICE)
+    assert.equal(rows[0]?.priority, 'high')
+    assert.equal(rows[0]?.template_id, 'withdrawal.failed_refunded')
+
+    await dispatchDue(rig.deps, 50)
+    const email = rig.adapters.email.sent[0]?.message
+    const text = `${email?.subject}\n${email?.body}`
+    assert.match(text, /being returned to your balance/)
+    assert.doesNotMatch(text, /still held/)
+
+    // And `high` really is muteable, which is the half of the priority argument a unit test on the
+    // rule cannot show: the same event, for a user who has switched the category off, is
+    // suppressed rather than forced through. That is the difference from the test above, and it is
+    // the reason the two dispositions are not one priority.
+    await upsertPreferences(sql, BOB, everythingDisabled())
+    const muted = await ingestEvent(
+      rig.deps,
+      failure({ withdrawalId: WITHDRAWAL, userId: BOB, reason: 'the chain rejected it', refundable: true }),
+    )
+    assert.equal(muted.kind, 'processed')
+    if (muted.kind !== 'processed') return
+    assert.deepEqual(muted.created, [])
+    assert.equal(muted.suppressed.length, 1)
+  })
+
+  /**
+   * **Yesterday's payload, through the whole pipeline.**
+   *
+   * The trap this exists for: an end-to-end test that only ever sends today's payload stays GREEN
+   * with the recipient logic deliberately broken, because an absent field is null to every reader
+   * and a rule that guesses from the key produces a notification that looks perfectly well formed.
+   * It has a user id, it has a template, it renders. It goes to a user who does not exist.
+   *
+   * So the pre-fix shape — `{ withdrawalId, reason, refundable }`, exactly what `failedEvents`
+   * emitted before settlement added the field — is driven through `ingestEvent`, and the assertion
+   * is that NOTHING is written. `no_recipient` is the honest answer and it names a producer to go
+   * and fix; a row here would mean this service had invented a recipient.
+   */
+  test("yesterday's failure payload writes no notification at all, rather than one for nobody", async () => {
+    const rig = testRig(sql)
+    const outcome = await ingestEvent(
+      rig.deps,
+      failure({ withdrawalId: WITHDRAWAL, reason: 'the chain rejected it', refundable: false }),
+    )
+    assert.deepEqual(outcome, { kind: 'ignored', reason: 'no_recipient' })
+
+    const rows = await sql<Array<{ n: number }>>`select count(*)::int as n from notifications`
+    assert.equal(rows[0]?.n, 0, 'a notification was written for a recipient nobody named')
+    // And the absence is counted, so an operator sees a producer to page rather than silence.
+    assert.equal(counterValue(rig.metrics, 'notify_suppressed_total', { reason: 'no_recipient' }), 1)
+  })
+
+  /**
+   * The regression that costs the most, driven end to end: the producer stops sending `refundable`.
+   *
+   * settlement made it a required boolean, so this is a relay dropping a field, a replay of an old
+   * event, or a rewrite that made it optional again. In every one of those the truthful answer is
+   * "we do not know", and the notification must read as HELD — because `wallet/src/server.ts:875`
+   * refuses to refund without proof, and a notification saying the money is on its way back while
+   * wallet holds it is the one error nobody can take back.
+   */
+  test('a failure payload with refundable dropped is delivered as HELD, not as a refund', async () => {
+    const rig = testRig(sql)
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+
+    await ingestEvent(rig.deps, failure({ withdrawalId: WITHDRAWAL, userId: ALICE, reason: 'unknown' }))
+    const rows = await sql<Array<{ priority: string; template_id: string }>>`
+      select priority, template_id from notifications
+    `
+    assert.equal(rows[0]?.priority, 'critical')
+    assert.equal(rows[0]?.template_id, 'withdrawal.failed_held')
+
+    await dispatchDue(rig.deps, 50)
+    const email = rig.adapters.email.sent[0]?.message
+    const text = `${email?.subject}\n${email?.body}`
+    assert.match(text, /still held/)
+    assert.doesNotMatch(text, /coming back|being returned to your balance/)
   })
 })
