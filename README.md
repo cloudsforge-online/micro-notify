@@ -4,6 +4,8 @@ Preferences, templates, notifications, deliveries, digests and developer webhook
 question "was this person told, on which channel, and did it arrive" — and nothing else. It decides
 *whether* and *where* to send; it does not decide what happened, and it never originates a fact.
 
+Design authority: [`ecosystem/03-repository-responsibilities.md`](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/03-repository-responsibilities.md)
+
 > **A critical notification ignores preferences, and the database is what enforces that.** A user
 > cannot opt out of being told their key left — and neither can a bug, a migration, or an operator
 > with a connection. Two CHECK constraints on `notifications` carry it:
@@ -134,3 +136,10 @@ database tests do not run, and CI fails a build whose suite skipped them.
   on the assumption that the metrics port is not routed publicly. The gateway's public map
   (`micro-deploy`) does not route it.
 - **Nothing is deployed.** This service has never run against a persistent database outside a test.
+
+---
+
+## Provenance
+
+The code in this repository was written by **Claude Opus 5** and **Claude Fable 5**, under
+human direction and review.
