@@ -162,6 +162,11 @@ test('a recorded gap disappears once this service writes the rule it said was im
  * address somebody from the shape the producer actually emits, copied field for field from the
  * emit site named in each quarantine entry. Asserting `hasRule` alone would repeat the mistake the
  * whole file exists to stop: counting a rule as coverage without ever running it.
+ *
+ * All three are REGISTERED now — micro-contracts pasted the quarantined specs into the registry
+ * within the hour — so the quarantine assertions here have flipped: each must be in the registry
+ * and must NOT be in `AWAITING_REGISTRATION`, which is the deletion `adoptedProposals()` demanded.
+ * The payload half of the test is unchanged, because that is the half that proves the rule works.
  */
 test('each newly live rule addresses a real recipient from the payload its producer really sends', () => {
   const cases = [
@@ -190,11 +195,16 @@ test('each newly live rule addresses a real recipient from the payload its produ
 
   for (const each of cases) {
     assert.equal(hasRule(each.topic), true, `${each.topic} has no rule`)
-    // Unregistered on purpose: each is quarantined with the spec that registers it, and `events.ts`
-    // accepts an unregistered topic exactly when a rule exists.
-    assert.equal(isRegisteredTopic(each.topic), false, `${each.topic} is registered — delete the quarantine entry`)
-    assert.ok(Object.hasOwn(AWAITING_REGISTRATION, each.topic), `${each.topic} is not quarantined`)
+    assert.equal(isRegisteredTopic(each.topic), true, `${each.topic} was adopted by contracts`)
+    assert.equal(
+      Object.hasOwn(AWAITING_REGISTRATION, each.topic),
+      false,
+      `${each.topic} is registered AND quarantined — the quarantine entry is the thing to delete`,
+    )
 
+    // Still assembled by hand rather than by `makeEvent`: the payloads below are the producers'
+    // real shapes, and building them through the registry would only prove the registry agrees
+    // with itself. `unregisteredEvent` is a plain envelope builder, not a claim about the topic.
     const event = unregisteredEvent(each.topic, 'k-1', { ...each.payload }, { actor: each.actor })
     const set = RULES[each.topic]?.recipients(event)
     assert.equal(set?.kind, 'recipients', `${each.topic} resolves nobody from what its producer sends`)
@@ -219,35 +229,66 @@ test('each newly live rule addresses a real recipient from the payload its produ
 })
 
 /**
- * The two that did NOT become rules, and why the difference is not a judgement call.
+ * The one that is still a record, and why it is not the one beside it.
  *
- * Both topics are emitted by a live producer, which is what micro-org's check saw. Neither envelope
- * names anybody this service could notify: settlement's failure is wallet's narrow handover with no
- * userId and no actor, and market's offer names the OFFERER while the notification is for the
- * SELLER. A rule on either would answer no_recipient for ever, or — worse for market — address the
- * wrong person. This pins that they stay recorded rather than quietly acquiring a rule that reports
- * coverage it does not have.
+ * Both topics were emitted by a live producer, which is what micro-org's check saw, and neither
+ * envelope named anybody this service could notify. `settlement.outbound.failed` has since had its
+ * `userId` added by its producer and is a rule; `market.offer.made` has not, and this pins that it
+ * stays recorded rather than quietly acquiring a rule that would address the wrong person — the
+ * OFFERER, who is on the envelope, rather than the SELLER, who is not.
+ *
+ * The difference is checked from the source, not asserted from memory: the record's `evidence`
+ * names `market/src/bids.ts:432`, and the estate check in micro-org reads `emits` as a literal.
  */
 test('a topic whose envelope names nobody stays a record, not a rule', () => {
-  for (const topic of ['settlement.outbound.failed', 'market.offer.made']) {
-    assert.equal(hasRule(topic), false, `${topic} has a rule and its envelope names no recipient`)
-    const gap = UNPRODUCED_NOTIFICATIONS.find((each) => each.emits === topic)
-    assert.ok(gap, `${topic} is neither ruled nor recorded`)
-    assert.equal(gap?.blockedBy, 'no-subject')
-    assert.match(gap?.owner ?? '', /^micro-(settlement|market)$/)
-  }
-  // settlement.outbound.failed was registered by contracts while this change was being written, so
-  // it needs the OTHER half of the coverage rule as well: a registered topic must be mapped or have
-  // a written reason. Its reason has to name the requirement that is still owed, or registering it
-  // would look like closing it.
-  assert.equal(isKnownTopic('settlement.outbound.failed'), true)
-  assert.match(
-    NON_NOTIFYING_TOPICS['settlement.outbound.failed'] ?? '',
-    /withdrawal transaction failed outright/,
-    'the non-notifying reason must point at the notification that is still missing',
+  assert.equal(
+    hasRule('market.offer.made'),
+    false,
+    'market.offer.made has a rule and its envelope names no recipient but the offerer',
   )
-  // market.offer.made is not registered, so it is not accepted at /ingest either.
+  const gap = UNPRODUCED_NOTIFICATIONS.find((each) => each.emits === 'market.offer.made')
+  assert.ok(gap, 'market.offer.made is neither ruled nor recorded')
+  assert.equal(gap?.blockedBy, 'no-subject')
+  assert.equal(gap?.owner, 'micro-market')
+  // Not registered, so it is not accepted at /ingest either.
   assert.equal(isKnownTopic('market.offer.made'), false)
+})
+
+/**
+ * The record that closed, checked from both ends.
+ *
+ * `settlement.outbound.failed` was the other `no-subject` record and it is now a rule, because
+ * settlement put `userId` on the payload (`settlement/src/withdrawals.ts:537`). Three things had to
+ * move together, and a test that checked only one would let the other two rot:
+ *
+ *   1. the rule exists — otherwise the notification is still missing;
+ *   2. the `UNPRODUCED_NOTIFICATIONS` record is gone — `contradictedGaps()` fails while both stand,
+ *      and that is the property the five deleted records did not have;
+ *   3. the `NON_NOTIFYING_TOPICS` entry is gone — it said the envelope names nobody, which is now
+ *      false, and a registered topic may be mapped OR recorded, never both.
+ */
+test('the failed-withdrawal record is gone from every place that claimed the gap', () => {
+  assert.equal(hasRule('settlement.outbound.failed'), true, 'the rule the record said was impossible')
+  assert.equal(isRegisteredTopic('settlement.outbound.failed'), true)
+  assert.equal(isKnownTopic('settlement.outbound.failed'), true)
+  assert.equal(
+    UNPRODUCED_NOTIFICATIONS.some((each) => each.emits === 'settlement.outbound.failed'),
+    false,
+    'a record saying this cannot be notified on, beside the rule that notifies on it',
+  )
+  assert.equal(
+    Object.hasOwn(NON_NOTIFYING_TOPICS, 'settlement.outbound.failed'),
+    false,
+    'both mapped and recorded as not notifying — the coverage table can only mean one of them',
+  )
+  // And the requirement it carried has not been dropped on the floor along with the record: the
+  // AD-08 coverage test in catalogue.test.ts now lists this topic as live.
+  assert.equal(
+    UNPRODUCED_NOTIFICATIONS.some(
+      (each) => each.requirement === 'withdrawal transaction failed outright',
+    ),
+    false,
+  )
 })
 
 /**

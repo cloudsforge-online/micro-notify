@@ -29,6 +29,21 @@
  * ignores the user's preferences, and a `critical` set that grows is a preference page that
  * gradually stops working.
  *
+ * ## One topic, two facts: `variant`
+ *
+ * Nearly every topic carries one fact, so a rule fixes its priority and its template once. One
+ * does not. `settlement.outbound.failed` says a withdrawal ended without reaching the chain, and
+ * its `refundable` field decides whether the money is **coming back** or is **held** — two
+ * different sentences to the person whose money it is, and, because one of them is the only thing
+ * in the estate that will ever tell them their funds are stuck, two different priorities.
+ *
+ * `variant` is how a rule says that, and its shape is the argument. The rule's own `priority` and
+ * `templateId` are the fact that applies **when nothing is proven**; the variant carries a `when`
+ * that must return true before its priority and template are used instead. So the safe reading is
+ * what an absent, malformed or unknown field produces, by construction rather than by a default
+ * somebody remembered to write the right way round. Both halves are enumerable — `outcomesOf` —
+ * so the coverage tests that walk every priority and every template still see all of them.
+ *
  * ## Coverage
  *
  * `catalogue.test.ts` asserts that every topic in the frozen registry is either mapped here or
@@ -72,6 +87,27 @@ export type RecipientSet =
   | { readonly kind: 'recipients'; readonly recipients: readonly [Recipient, ...Recipient[]] }
   | { readonly kind: 'none'; readonly reason: 'not_applicable' | 'no_recipient' }
 
+/**
+ * The other fact a topic carries, and the test an event must PASS to be read as that fact.
+ *
+ * Deliberately not "a function from event to priority". A function cannot be enumerated, so the
+ * §10.3 coverage test could no longer list every critical notification and the template-coverage
+ * test could no longer prove every template is reachable — both would have degraded into "trust
+ * the closure", which is how the fifteen unreachable rules survived. Data with one predicate keeps
+ * every outcome visible to a test while still letting the payload choose between them.
+ *
+ * The asymmetry is the point: the rule's own priority and template are what an event gets when
+ * `when` does not fire, so the DEFAULT is whatever the rule declares and the variant has to be
+ * earned. See the `settlement.outbound.failed` rule for the case this exists for.
+ */
+export interface Variant {
+  readonly when: (event: InboundEvent) => boolean
+  readonly priority: Priority
+  readonly templateId: TemplateId
+  /** Why this fact is different news from the rule's own, and why it is a different priority. */
+  readonly why: string
+}
+
 export interface Rule {
   readonly category: Category
   readonly priority: Priority
@@ -79,6 +115,35 @@ export interface Rule {
   /** Why this event is worth interrupting someone for. Read it before changing a priority. */
   readonly why: string
   readonly recipients: (event: InboundEvent) => RecipientSet
+  /** Present only where one topic carries two materially different facts. See `Variant`. */
+  readonly variant?: Variant
+}
+
+/** What a rule decided this particular event is: how loud, and in which words. */
+export interface Outcome {
+  readonly priority: Priority
+  readonly templateId: TemplateId
+}
+
+/**
+ * Resolve a rule against one event.
+ *
+ * `=== true` rather than a truthiness test on the predicate's result: the predicate is typed
+ * `boolean`, and this is the second guard for the same reason its subject has one — a variant that
+ * is reached by accident is a notification that says the wrong thing.
+ */
+export function outcomeOf(rule: Rule, event: InboundEvent): Outcome {
+  if (rule.variant !== undefined && rule.variant.when(event) === true) {
+    return { priority: rule.variant.priority, templateId: rule.variant.templateId }
+  }
+  return { priority: rule.priority, templateId: rule.templateId }
+}
+
+/** Every outcome a rule can produce. The coverage tests walk this, never `rule.priority` alone. */
+export function outcomesOf(rule: Rule): readonly [Outcome, ...Outcome[]] {
+  const base: Outcome = { priority: rule.priority, templateId: rule.templateId }
+  if (rule.variant === undefined) return [base]
+  return [base, { priority: rule.variant.priority, templateId: rule.variant.templateId }]
 }
 
 /* ------------------------------------------------------------------ payload readers */
@@ -107,6 +172,37 @@ function flag(payload: Record<string, unknown>, names: readonly string[]): boole
     if (value === 'false') return false
   }
   return false
+}
+
+/**
+ * Whether a failed withdrawal's money is coming back.
+ *
+ * **`=== true`, and deliberately not `flag()`.** `flag` accepts `'true'` as a string and reads
+ * several spellings, which is the right tolerance for a `new_device` marker and the wrong one
+ * here: this predicate has to agree, byte for byte, with the consumer that actually moves the
+ * money. `wallet/src/server.ts:875` writes `refundable: payload['refundable'] === true` and says
+ * why — refunding a payment that really landed pays the user twice, and that error cannot be
+ * undone. `activity/src/classify.ts:192` mirrors the same `=== true` so a feed entry can never
+ * read "on its way back" beside a balance wallet is holding.
+ *
+ * So an absent field, a string, a number and a null all mean HELD, which is the safe direction and
+ * the whole reason this is a predicate with one spelling rather than a tolerant reader. Telling
+ * somebody their money is coming back when it is held is the expensive error; it is also the one a
+ * careless default produces, so the default is arranged to be unreachable rather than correct.
+ */
+function refunded(payload: Record<string, unknown>): boolean {
+  return payload['refundable'] === true
+}
+
+/**
+ * The withdrawal a settlement outbound event is about.
+ *
+ * The key is a safe fallback here and only here among the withdrawal topics: the registry keys
+ * `settlement.outbound.*` by `withdrawal_id`, so the key IS this id. It is emphatically not a
+ * user, which is why `userIdOf` refuses to fall back to it for this topic.
+ */
+function withdrawalIdOf(event: InboundEvent): string {
+  return str(event.payload, ['withdrawal_id', 'withdrawalId'], event.key)
 }
 
 /**
@@ -446,6 +542,91 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
+  /**
+   * A withdrawal that ended without reaching the chain — **and where the money went.**
+   *
+   * ## Why this rule was refused, and what changed
+   *
+   * `NON_NOTIFYING_TOPICS` carried this topic with the note that its envelope "names nobody notify
+   * could address", and `UNPRODUCED_NOTIFICATIONS` carried the matching record. Both were right:
+   * the payload was `{ withdrawalId, reason, refundable }`, `failedEvents` sets no actor (so this
+   * service's relay stamps `service:settlement`), and the registry keys the topic by
+   * `withdrawal_id` — which is a uuid, so a key fallback would have handed back a withdrawal id as
+   * a user id. Well-formed, queryable and wrong. A rule then would have answered `no_recipient`
+   * for ever, and a rule that resolves nobody is worse than a written-down gap, because the
+   * coverage test counts it.
+   *
+   * `settlement/src/withdrawals.ts:537` now sends `userId` — the same value `stuckEvents` already
+   * sent off the same row — so `forUser` resolves a recipient here exactly as it does on
+   * `settlement.withdrawal.stuck`. Note what settlement did **not** do: it did not mint
+   * `settlement.withdrawal.failed`. Its reasoning is on `failedEvents` and it is right — `completed`
+   * has a twin because the two carry different payloads for different readers, whereas a `.failed`
+   * twin would be one fact under two official names keyed identically, which is the
+   * `settlement.outbound.stuck` proposal micro-contracts already refused. What was missing was the
+   * recipient, not the topic.
+   *
+   * ## Two facts, and `refundable` decides which
+   *
+   * "Your withdrawal failed and the money is coming back" and "your withdrawal failed and your
+   * money is held" are different news, and micro-activity classified them as two entries
+   * (`withdrawal.failed_refunded` / `withdrawal.failed_held`, activity/src/classify.ts:502) for
+   * exactly this reason. So this rule has a `variant` rather than one hedged sentence, and the
+   * templates keep activity's names so the feed entry and the notification a user reads on the
+   * same screen cannot say opposite things.
+   *
+   * ## The held case is `critical`, and the refunded case is not
+   *
+   * §10.3's critical list names **withdrawal**, so neither of these is a promotion beyond it; the
+   * question is only which of the two a user may be allowed to mute. The held case may not be, on
+   * one fact: **nothing else in the estate will ever tell them.** Trace it. wallet's non-refundable
+   * branch (`wallet/src/withdrawals.ts:592`) moves the row to `stuck` and emits nothing at all —
+   * the only `wallet.withdrawal.stuck` emit is the deadline sweep at `:684`, and that topic is in
+   * no registry anyway. `settlement.withdrawal.stuck` does not fire, because a failure is not a
+   * late transaction. `ledger.entry.posted` does not fire either: nothing is posted, and notify's
+   * rule for it requires a `user_id` the ledger payload has never carried. The user's balance shows
+   * an amount reserved against a payment that will never be made, the destination shows nothing
+   * arrived, and the only account of it is this notification. A `min_priority` of `critical` on the
+   * withdrawal category, or that category switched off, would turn "your money is stuck" into
+   * silence — which is the exact substitution §10.3's invariant exists to forbid.
+   *
+   * The refunded case is `high`, beside `completed` and `stuck`. The money is back and spendable,
+   * so the balance itself is a second, independent account of the fact; the user's next action is
+   * "try again", not "find out where my money is"; and every unnecessary `critical` is a
+   * preference page that quietly stops working (see this file's header). `high` is prompt and
+   * muteable, which is what recoverable news should be.
+   *
+   * ## The dedupe key names the disposition, not just the withdrawal
+   *
+   * Two reasons. `settlement.withdrawal.stuck` already keys `withdrawal.failed:<id>`, and a
+   * withdrawal that went late and then failed must produce both — the second is the outcome of the
+   * first, and collapsing them would mean the user hears "it is late" and never hears how it
+   * ended. And if a held failure were ever corrected to a refunded one, the correction is the most
+   * important message in the sequence and must not dedupe into the thing it corrects. Literal
+   * redelivery is handled where it belongs, by the inbox unique on `(topic, event_id)`.
+   */
+  'settlement.outbound.failed': Object.freeze({
+    category: 'withdrawal',
+    // The default, and the reading an absent `refundable` gets. See `refunded`.
+    priority: 'critical',
+    templateId: 'withdrawal.failed_held',
+    why: 'A withdrawal ended with the money neither at its destination nor back in the balance, and no other event in the estate says so — wallet moves the row to stuck and emits nothing. Silence here is a user whose funds have vanished from their own view.',
+    variant: Object.freeze({
+      when: (event) => refunded(event.payload),
+      priority: 'high',
+      templateId: 'withdrawal.failed_refunded',
+      why: 'The money is coming back, so the balance is a second account of the fact and the action is "try again". Prompt, and muteable — a critical set that grows past what a user must never be able to silence is a preference page that stops working.',
+    } satisfies Variant),
+    recipients: forUser(
+      (event) =>
+        `${refunded(event.payload) ? 'withdrawal.failed_refunded' : 'withdrawal.failed_held'}:${withdrawalIdOf(event)}`,
+      (event) => ({
+        withdrawalId: withdrawalIdOf(event),
+        reason: str(event.payload, ['reason'], 'it could not be sent'),
+        at: formatInstant(event.occurredAt),
+      }),
+      (event) => `cf:settlement:withdrawal:${withdrawalIdOf(event)}`,
+    ),
+  }),
 
   'ledger.entry.posted': Object.freeze({
     category: 'transfer',
@@ -841,14 +1022,13 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
     'A world event whose personal half already notifies: every victor hears through spire.captured, with the members carried on that payload. Telling every player their world ended is an announcement, not a notification — the broadcast channel is the honest one, and worlds consumes this event for heraldry entitlements, not people.',
   'ledger.reconciliation.completed':
     'Custody total against indexer-observed total. It concerns operators and freezes withdrawals; no individual user is its subject.',
-  // ── settlement's handover topics, registered after the withdrawal ones ─────────────────────
-  // All three are settlement talking to wallet or to reconciliation, not to a person. The two
-  // user-facing withdrawal outcomes — completed and stuck — already have rules above, and the
-  // failure that has no user-facing twin is recorded in topics.ts rather than notified on here.
+  // ── settlement's handover topics ───────────────────────────────────────────────────────────
+  // `settlement.outbound.failed` USED TO BE HERE, recorded as "a notification the estate still
+  // owes somebody" because its envelope named nobody. It is a rule now: settlement put `userId` on
+  // the payload (withdrawals.ts:537) and the recipient — the only thing that was missing — resolves.
+  // The two that remain are settlement talking to wallet or to reconciliation, not to a person.
   'settlement.outbound.confirmed':
-    "wallet's own narrow name for the same movement settlement.withdrawal.completed announces (settlement/src/withdrawals.ts:441 and :451 emit both from one function). It exists to release the reservation at wallet/src/server.ts:859 and carries a withdrawal id, a hash and a timestamp. A rule here as well would tell one user their withdrawal arrived twice.",
-  'settlement.outbound.failed':
-    'The same handover for the other outcome, and the one entry in this table that records a notification the estate still owes somebody. Its envelope names nobody notify could address — `payload: { withdrawalId, reason, refundable }` at settlement/src/withdrawals.ts:482, and `failedEvents` sets no actor — so a rule on it would answer no_recipient for every event for ever. `refundable` is for wallet, which reads it at server.ts:872 to decide whether the money goes back. The user-facing twin does not exist: completed and stuck both carry userId and are broad, and there is no settlement.withdrawal.failed. That gap is UNPRODUCED_NOTIFICATIONS’ "withdrawal transaction failed outright", owned by micro-settlement.',
+    "wallet's own narrow name for the same movement settlement.withdrawal.completed announces (settlement/src/withdrawals.ts:437 and :449 emit both from one function). It exists to release the reservation at wallet/src/server.ts:846 and carries a withdrawal id, a hash and a timestamp. A rule here as well would tell one user their withdrawal arrived twice. Note that this is NOT the shape of the failure twin, which had no user-facing counterpart at all and is now mapped: a second rule here would duplicate a notification, whereas the failure had none.",
   'settlement.sweep.completed':
     "A deposit address emptied into the pinned treasury. No user balance changes — wallet credited the deposit when it confirmed, long before the sweep — so there is nothing here a person could act on or would recognise. It exists for reconciliation, which is the one movement no other topic reports, and it is keyed by the sweep source rather than by anybody.",
 })
@@ -856,9 +1036,18 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
 /**
  * Topics that mean "delete everything you hold about this user".
  *
- * `identity.user.deleted` currently has no subscriber anywhere in the estate, which is precisely
- * why there is no GDPR erasure path. Notify holds notification bodies, email addresses, phone
- * numbers and push tokens, so it is one of the services that most needs to honour it.
+ * Notify holds notification bodies, email addresses, phone numbers and push tokens, so it is one
+ * of the services that most needs to honour this.
+ *
+ * **This comment used to end "identity.user.deleted currently has no subscriber anywhere in the
+ * estate, which is precisely why there is no GDPR erasure path", and that has stopped being
+ * true.** Three services consume it today: this one (`pipeline.ts`, `eraseUser`),
+ * `activity/src/ingest.ts:186`, which erases rather than writing "your account was deleted" into
+ * the feed of a user who no longer exists, and `trade/src/server.ts:747`, whose `SUBSCRIBED_TOPICS`
+ * holds this and nothing else. The erasure path exists; what nobody has checked is whether every
+ * service holding a `user_id` is on it, and that is a question only a checkout holding all of them
+ * can answer — `micro-org`'s `tools/estate-topics.mjs`, the same place the cross-repository half of
+ * `topics.ts`'s staleness question went.
  */
 export const ERASURE_TOPICS: ReadonlySet<string> = new Set(['identity.user.deleted'])
 

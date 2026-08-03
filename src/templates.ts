@@ -172,6 +172,43 @@ export const TEMPLATES = Object.freeze({
       'A withdrawal of {{amount}} {{asset}} did not go through: {{reason}}.\n\nNothing has left your balance. You can try again, and support can tell you why if the reason is not clear.',
     ),
   }),
+  /* ------------------------------------------------------------------
+   * The two halves of a failed withdrawal.
+   *
+   * These are two templates and not one parameterised sentence, because the fact they report is
+   * two facts: `refundable` on `settlement.outbound.failed` decides whether the money is coming
+   * back or is held, and every reader in the estate splits on it (`wallet/src/server.ts:875`,
+   * `activity/src/classify.ts:502`). The ids are activity's own type names, so the feed entry and
+   * the notification a user sees on one screen cannot disagree.
+   *
+   * Neither carries an amount. settlement's failure payload is
+   * `{ withdrawalId, userId, reason, refundable }` and has never carried one, and a template
+   * parameter whose only source is a fallback renders a sentence about "your withdrawal" that
+   * pretends to a precision it does not have. The withdrawal id is here instead: it is the one
+   * field a person quoting this to support cannot do without.
+   * ------------------------------------------------------------------ */
+  'withdrawal.failed_held': Object.freeze({
+    id: 'withdrawal.failed_held',
+    category: 'withdrawal',
+    params: ['withdrawalId', 'reason', 'at'],
+    path: '/wallet/activity',
+    // Says the amount is HELD and does not say to try again. Suggesting a retry for a payment that
+    // may have left the platform is how a user is invited to pay twice.
+    text: en(
+      'Your withdrawal could not be completed, and the amount is still held',
+      'A withdrawal from your account could not be completed at {{at}}: {{reason}}.\n\nThe amount is still held. It has not been returned to your balance, and we cannot yet confirm whether the payment left the platform — so please do not request it again until this is resolved.\n\nSomeone is already looking at it. Quote withdrawal {{withdrawalId}} if you contact support.',
+    ),
+  }),
+  'withdrawal.failed_refunded': Object.freeze({
+    id: 'withdrawal.failed_refunded',
+    category: 'withdrawal',
+    params: ['withdrawalId', 'reason', 'at'],
+    path: '/wallet/activity',
+    text: en(
+      'Your withdrawal was not sent, and the amount is coming back',
+      'A withdrawal from your account was not sent at {{at}}: {{reason}}.\n\nThe payment never left the platform and the amount is being returned to your balance. You can request it again once it shows.\n\nWithdrawal {{withdrawalId}}.',
+    ),
+  }),
   'transfer.posted': Object.freeze({
     id: 'transfer.posted',
     category: 'transfer',

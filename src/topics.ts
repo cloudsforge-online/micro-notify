@@ -64,10 +64,25 @@
  * checkout that holds every producer and every consumer at once. That function's own comment
  * carries the full argument, including why the old one was not fixable in place.
  *
- * Three of the five became the rules in `AWAITING_REGISTRATION` below. Two did not, and the reason
- * is written into each record: `settlement.outbound.failed` and `market.offer.made` are real events
- * whose envelopes name nobody this service could notify. That distinction is what `blockedBy` now
- * carries, and it is why "the producer emits it" was never on its own enough to write a rule.
+ * Three of the five became rules quarantined in `AWAITING_REGISTRATION` below, and `micro-contracts`
+ * has since registered all three, so that table is now empty — see its comment. Two did not become
+ * rules, and the reason was written into each record: `settlement.outbound.failed` and
+ * `market.offer.made` were real events whose envelopes named nobody this service could notify. That
+ * distinction is what `blockedBy` carries, and it is why "the producer emits it" was never on its
+ * own enough to write a rule.
+ *
+ * ## And one of those two has since closed, which is the fourth thing this file has learned
+ *
+ * `settlement.outbound.failed` is a rule now. Its record said the envelope named nobody; settlement
+ * put `userId` on the payload (`settlement/src/withdrawals.ts:537`) and the sentence stopped being
+ * true. `contradictedGaps()` is what forced the record's deletion — a rule and a record for the
+ * same topic cannot both stand — so the repair emptied the record instead of leaving it beside the
+ * code contradicting it. That is the property the five deleted records did not have, working, in
+ * the one repository that can see it.
+ *
+ * `market.offer.made` has NOT closed and is checked, not assumed: `market/src/bids.ts:432` still
+ * emits `{ listingId, offerId, offererSubject, amount, assetCode }` with no seller on it, while
+ * `bids.ts:399` reads `listing.sellerSubject` thirty lines above to refuse shill bidding. One field.
  */
 
 import {
@@ -99,51 +114,25 @@ export interface ProposedTopic {
  * fails the moment contracts adopts one and the entry is not deleted, so this cannot rot into a
  * permanent allow-list the way the fifteen did.
  *
- * **The three below are the mechanism working rather than a gap.** Each was a record in
- * `UNPRODUCED_NOTIFICATIONS` saying the notification could not be produced, while the producer had
- * been emitting the topic all along under the name this file itself had written down. Each spec is
- * copied VERBATIM from the producing service's own quarantine — `trade/src/topics.ts:117`,
- * `devplatform/src/topics.ts:100` and `:112` — so `micro-contracts` adopting them is a paste, and
- * so the two repositories cannot propose two different contracts for one topic.
+ * **It is empty, and that is the mechanism finishing rather than a mechanism nobody uses.** It held
+ * `trade.bot.paused`, `devplatform.key.issued` and `devplatform.key.revoked` for about half an
+ * hour. Each had been a record in `UNPRODUCED_NOTIFICATIONS` saying the notification could not be
+ * produced while its producer had been emitting the topic all along, under the name this file
+ * itself had written down; each was quarantined with the spec that would register it, copied
+ * verbatim from the producing service's own quarantine so the two repositories could not propose
+ * two different contracts for one topic. `micro-contracts` adopted all three
+ * (`contracts/packages/events/src/index.ts:718`, `:725`, `:732`) — its own commit says landing them
+ * "makes `adoptedProposals()` non-empty in micro-trade, micro-devplatform and micro-notify, whose
+ * suites now fail until the matching quarantine entries are deleted. That is the self-emptying
+ * quarantine working, not a regression this commit introduced." It was right: this repository's
+ * suite went red for exactly that, and these are the deletions it was asking for.
+ *
+ * So the honest state of the escape hatch today is **unused**. Every rule in `catalogue.ts` names a
+ * topic the registry holds, which is the state the whole file is trying to reach. It stays because
+ * the situation it exists for recurs — notify is the first consumer of every new topic — and
+ * because an empty quarantine is checkable while an absent one is not.
  */
-export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({
-  'trade.bot.paused': {
-    reason:
-      'The other half of started. Without it a consumer that saw a bot start believes it is still trading for ever — and pause does NOT flatten the position (trade/src/bots.ts:610), so the owner is still exposed to a market their bot has stopped watching. AD-08 asks for a trading-bot notification and this is the one trade emits.',
-    emittedAt: 'trade/src/bots.ts:614',
-    spec: {
-      producer: 'trade',
-      payloadType: 'BotPaused',
-      version: '1.0',
-      keyedBy: 'bot_id',
-      description: 'A bot stopped trading.',
-    },
-  },
-  'devplatform.key.issued': {
-    reason:
-      "The other half of revoked, and a key issued by somebody other than its owner is the first thing a compromise looks like. An API key acts as the user, with no password and no second factor behind it, and nothing can tell the account holder today.",
-    emittedAt: 'devplatform/src/apikeys.ts:274',
-    spec: {
-      producer: 'devplatform',
-      payloadType: 'ApiKeyIssued',
-      version: '1.0',
-      keyedBy: 'key_id',
-      description: 'An API key was issued for a project, with its scopes and prefix.',
-    },
-  },
-  'devplatform.key.revoked': {
-    reason:
-      '11-data-and-contract-strategy.md:363 names THIS TOPIC as the mechanism by which a revoked API key stops working at every 30-second gateway cache in the estate. Unregistered, no consumer can classify it, so the documented propagation path does not exist and revocation is immediate only inside devplatform.',
-    emittedAt: 'devplatform/src/apikeys.ts:359',
-    spec: {
-      producer: 'devplatform',
-      payloadType: 'ApiKeyRevoked',
-      version: '1.0',
-      keyedBy: 'key_id',
-      description: 'An API key was revoked. Every cache holding a verification result for it must drop it.',
-    },
-  },
-})
+export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({})
 
 /**
  * An AD-08 notification this service cannot produce, and the ONE reason why.
@@ -221,15 +210,31 @@ export const UNPRODUCED_NOTIFICATIONS: readonly UnproducedNotification[] = Objec
     evidence:
       'wallet emits at credit time and not before: DEPOSIT_CREDITED at wallet/src/deposits.ts:657, keyed by wallet_id. The seen-but-not-yet-credited state — the one that generates the support ticket — is visible in wallet\'s own read model (deposits.ts:734) and is announced to nobody.',
   }),
-  Object.freeze({
-    requirement: 'withdrawal transaction failed outright',
-    guessedTopic: 'settlement.transaction.failed',
-    emits: 'settlement.outbound.failed',
-    blockedBy: 'no-subject',
-    owner: 'micro-settlement',
-    evidence:
-      "settlement/src/withdrawals.ts:482 emits it with `payload: { withdrawalId, reason, refundable }`, keyed by the withdrawal id, and `failedEvents` sets no actor — so an envelope on it names nobody this service could notify, and a rule keyed to it would answer no_recipient for ever. It is WALLET'S name and wallet's contract (settlement/src/outbox.ts:49-55: \"spelled in wallet/src/settlement.ts before this repository existed\"), narrow on purpose, carrying `refundable` so wallet knows whether to return the reservation. The user-facing twin does not exist: settlement.withdrawal.completed (:451) and settlement.withdrawal.stuck (:532) both carry userId and both are broad, and there is no settlement.withdrawal.failed. The repair is settlement emitting one, exactly as it added the stuck twin — not notify keying a rule to a handover between two other services.",
-  }),
+  /* ────────────────────────────────────────────────────────────────────────────────────────────
+   * DELETED: 'withdrawal transaction failed outright', guessed at `settlement.transaction.failed`,
+   * recorded `blockedBy: 'no-subject'` against `settlement.outbound.failed`.
+   *
+   * It is a rule now — `catalogue.ts`, `settlement.outbound.failed` — and the record had to go
+   * because `contradictedGaps()` fails while both exist. That is this file's own mechanism doing
+   * the thing the five deleted records did not: writing the rule DELETES the record rather than
+   * leaving a note saying the notification is impossible beside the code that produces it.
+   *
+   * The record was right when it was written and stopped being right in an hour. Its condition was
+   * "an envelope on it names nobody this service could notify", and settlement put `userId` on the
+   * payload (settlement/src/withdrawals.ts:537) — the same value `stuckEvents` already sent off the
+   * same row. Worth noting what settlement did NOT do: this record's own evidence said "the repair
+   * is settlement emitting one [a user-facing twin], exactly as it added the stuck twin", and
+   * settlement declined, on the grounds that a `.failed` twin would be one fact under two official
+   * names keyed identically — the `settlement.outbound.stuck` proposal micro-contracts had already
+   * refused. It added the missing FIELD instead. The record's diagnosis was right and its
+   * prescription was wrong, which is a good argument for evidence a reader can re-derive over a
+   * repair somebody wrote down.
+   *
+   * micro-org's `tools/estate-topic-gaps.json` holds the estate-side half of this record, keyed
+   * `stale-record:settlement.outbound.failed`, `status: 'deferred'` with an `until` that has now
+   * been met. That file fails its step when a recorded finding is repaired and not deleted, so it
+   * needs the same deletion. It is not in this repository's gift.
+   * ──────────────────────────────────────────────────────────────────────────────────────────── */
   Object.freeze({
     requirement: 'marketplace offer received',
     guessedTopic: 'market.offer.received',

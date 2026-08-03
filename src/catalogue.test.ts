@@ -13,11 +13,13 @@ import {
   MAPPED_TOPICS,
   NON_NOTIFYING_TOPICS,
   RULES,
+  outcomeOf,
+  outcomesOf,
   ruleFor,
   unmappedRegistryTopics,
 } from './catalogue.ts'
-import { CATEGORIES, PRIORITIES, isCategory, isPriority } from './model.ts'
-import { TEMPLATES, isTemplateId, templateFor } from './templates.ts'
+import { CATEGORIES, DEFAULT_LOCALE, PRIORITIES, isCategory, isPriority } from './model.ts'
+import { TEMPLATES, isTemplateId, renderTemplate, templateFor } from './templates.ts'
 import { UNPRODUCED_NOTIFICATIONS } from './topics.ts'
 import { registeredEvent, unregisteredEvent, ALICE, BOB } from './testsupport.ts'
 
@@ -66,10 +68,14 @@ test('every notification AD-08 names is either live or a recorded gap', () => {
     'custody.key.exported',
     // deposit confirmed
     'wallet.deposit.confirmed',
-    // withdrawal requested / completed / late
+    // withdrawal requested / completed / late / failed outright
     'wallet.withdrawal.requested',
     'settlement.withdrawal.completed',
     'settlement.withdrawal.stuck',
+    // "withdrawal transaction failed outright". Recorded as impossible for the life of this
+    // service because the envelope named nobody; settlement added `userId` (withdrawals.ts:537)
+    // and the record in topics.ts had to go, because contradictedGaps() refuses to hold both.
+    'settlement.outbound.failed',
     // marketplace sale
     'market.listing.sold',
     // token deployment
@@ -82,8 +88,9 @@ test('every notification AD-08 names is either live or a recorded gap', () => {
     'community.vote.cast',
     // trading-bot event, and the two API-key events. All three were RECORDED as impossible while
     // their producers were emitting them under the names this service had already written down —
-    // see topics.ts. They are keyed to unregistered topics on purpose, each quarantined with the
-    // spec that registers it, which is the state AWAITING_REGISTRATION exists to make visible.
+    // see topics.ts. They were quarantined in AWAITING_REGISTRATION with the specs that would
+    // register them; micro-contracts has since pasted all three into the registry, so the
+    // quarantine is empty and these are ordinary registered rules.
     'trade.bot.paused',
     'devplatform.key.issued',
     'devplatform.key.revoked',
@@ -100,22 +107,40 @@ test('every notification AD-08 names is either live or a recorded gap', () => {
   for (const requirement of [
     'risk limit reached',
     'deposit detected, before confirmation',
-    // Both of these name a topic a live producer emits — which is why they LOOK like the three that
-    // just became rules, and are not. Neither envelope carries anybody this service could address:
-    // settlement's failure is wallet's narrow handover with no userId and no actor, and market's
-    // offer names the offerer while the notification is for the seller. `blockedBy: 'no-subject'`.
-    'withdrawal transaction failed outright',
+    // Names a topic a live producer emits — which is why it LOOKS like the ones that became rules,
+    // and is not. market/src/bids.ts:432 puts the OFFERER on the envelope and the notification is
+    // for the SELLER, so `blockedBy: 'no-subject'` and one field on market's payload closes it.
     'marketplace offer received',
     'auction ended',
     'service incident',
   ]) {
     assert.ok(recorded.has(requirement), `AD-08 names "${requirement}" and nothing here accounts for it`)
   }
+  // And the one that closed. It was in the list above until settlement put `userId` on the failure
+  // payload; keeping it there while a rule exists is the exact contradiction contradictedGaps()
+  // fails on. Asserted from BOTH sides so neither half can be forgotten.
+  assert.equal(
+    recorded.has('withdrawal transaction failed outright'),
+    false,
+    'this is a rule now — a record saying it cannot be produced contradicts the catalogue',
+  )
   assert.ok(MAPPED_TOPICS.length >= live.length)
 })
 
+/**
+ * §10.3's critical list, walked over EVERY outcome a rule can produce rather than over
+ * `rule.priority`.
+ *
+ * The distinction is load-bearing now that one topic carries two facts: reading `rule.priority`
+ * alone would have counted `settlement.outbound.failed` as wholly critical and never looked at its
+ * variant, so a variant promoted to critical by a later edit would have been invisible to the one
+ * test whose job is to keep that set from growing.
+ */
 test('exactly the events 04-domain-model §10.3 names are critical', () => {
-  const critical = MAPPED_TOPICS.filter((topic) => RULES[topic]?.priority === 'critical').sort()
+  const critical = MAPPED_TOPICS.filter((topic) => {
+    const rule = RULES[topic]
+    return rule !== undefined && outcomesOf(rule).some((each) => each.priority === 'critical')
+  }).sort()
   assert.deepEqual(critical, [
     'custody.export.requested',
     'custody.key.exported',
@@ -124,49 +149,70 @@ test('exactly the events 04-domain-model §10.3 names are critical', () => {
     'identity.mfa.removed',
     'identity.session.created',
     'identity.session.revoked',
+    // §10.3's list names "withdrawal", and both of these are it: the request, which is the only
+    // window in which a theft can be stopped, and the failure that leaves the money HELD, which
+    // nothing else in the estate reports. The refunded half of that same topic is `high` — see the
+    // test below, which pins that it is not critical.
+    'settlement.outbound.failed',
     'wallet.withdrawal.requested',
   ])
 })
 
-test('every rule names a real category, priority and template', () => {
+test('every outcome a rule can produce names a real category, priority and template', () => {
   for (const [topic, rule] of Object.entries(RULES)) {
     assert.ok(isCategory(rule.category), `${topic}: unknown category ${rule.category}`)
-    assert.ok(isPriority(rule.priority), `${topic}: unknown priority ${rule.priority}`)
-    assert.ok(isTemplateId(rule.templateId), `${topic}: unknown template ${rule.templateId}`)
     assert.ok(rule.why.length > 30, `${topic}: say why this interrupts someone`)
     assert.ok(CATEGORIES.includes(rule.category))
-    assert.ok(PRIORITIES.includes(rule.priority))
+    for (const outcome of outcomesOf(rule)) {
+      assert.ok(isPriority(outcome.priority), `${topic}: unknown priority ${outcome.priority}`)
+      assert.ok(isTemplateId(outcome.templateId), `${topic}: unknown template ${outcome.templateId}`)
+      assert.ok(PRIORITIES.includes(outcome.priority))
+    }
+    // A variant is a second fact, so it argues for itself separately or it is decoration.
+    if (rule.variant) {
+      assert.ok(rule.variant.why.length > 30, `${topic}: say why the variant is different news`)
+      assert.notEqual(
+        rule.variant.templateId,
+        rule.templateId,
+        `${topic}: a variant rendering the same template says the same thing twice`,
+      )
+    }
   }
 })
 
 test("a rule's category agrees with its template's", () => {
   for (const [topic, rule] of Object.entries(RULES)) {
-    if (!isTemplateId(rule.templateId)) continue
-    const template = templateFor(rule.templateId)
-    assert.equal(
-      rule.category,
-      template.category,
-      `${topic} files under ${rule.category} but renders a ${template.category} template`,
-    )
+    for (const outcome of outcomesOf(rule)) {
+      if (!isTemplateId(outcome.templateId)) continue
+      const template = templateFor(outcome.templateId)
+      assert.equal(
+        rule.category,
+        template.category,
+        `${topic} files under ${rule.category} but renders a ${template.category} template`,
+      )
+    }
   }
 })
 
 test('every rule supplies every parameter its template requires', () => {
   // The check that stops "Hello undefined" reaching a user. Each rule is run against a payload
-  // holding nothing at all, so it passes only if the rule's fallbacks cover every parameter.
+  // holding nothing at all, so it passes only if the rule's fallbacks cover every parameter — and
+  // against every template it could choose, so a variant's template is covered too.
   for (const [topic, rule] of Object.entries(RULES)) {
     const event = unregisteredEvent(topic, ALICE, { user_ids: [ALICE], new_device: true })
     const set = rule.recipients({ ...event, actor: `user:${ALICE}` })
     if (set.kind === 'none') continue
-    if (!isTemplateId(rule.templateId)) continue
-    const template = templateFor(rule.templateId)
-    for (const recipient of set.recipients) {
-      for (const name of template.params) {
-        assert.notEqual(
-          recipient.params[name],
-          undefined,
-          `${topic} does not supply ${name} for ${rule.templateId}`,
-        )
+    for (const outcome of outcomesOf(rule)) {
+      if (!isTemplateId(outcome.templateId)) continue
+      const template = templateFor(outcome.templateId)
+      for (const recipient of set.recipients) {
+        for (const name of template.params) {
+          assert.notEqual(
+            recipient.params[name],
+            undefined,
+            `${topic} does not supply ${name} for ${outcome.templateId}`,
+          )
+        }
       }
     }
   }
@@ -288,7 +334,11 @@ test('a dedupe key never contains the event id for a fact that two events can de
 })
 
 test('every template is reachable from some rule, or is a platform template', () => {
-  const used = new Set<string>(Object.values(RULES).map((rule) => rule.templateId))
+  // Over every OUTCOME, not `rule.templateId`: a variant's template is reachable too, and reading
+  // only the rule's own would have reported `withdrawal.failed_refunded` as written-but-unrendered.
+  const used = new Set<string>(
+    Object.values(RULES).flatMap((rule) => outcomesOf(rule).map((each) => each.templateId)),
+  )
   // Produced by the service itself rather than by an event. `system.incident` joined them when
   // the admin_api.incident.opened rule was deleted: an incident reaches users as an operator
   // broadcast (POST /admin/broadcasts names a template id, pipeline.ts:555), which is the path
@@ -430,4 +480,206 @@ test('a registration greets the user by the handle identity sends, not by a disp
   assert.equal(set.recipients[0].userId, ALICE)
   assert.equal(set.recipients[0].params['handle'], 'sam')
   assert.equal(set.recipients[0].subjectUrn, `cf:identity:user:${ALICE}`)
+})
+
+/* ==================================================================================================
+ * settlement.outbound.failed — the rule that could not be written until settlement named a user.
+ *
+ * These are the tests that have to fail if the WRONG PERSON is told or the WRONG THING is said, and
+ * the two are separate failures with separate traps.
+ *
+ * **The wrong person.** The withdrawal id on this envelope is a uuid (`wallet/src/migrations.ts`
+ * keys `withdrawals` by one) and it is the envelope KEY, because the registry keys this topic by
+ * `withdrawal_id`. So a key fallback would return a well-formed, queryable, wrong user id, and the
+ * fixtures below deliberately give the key a different uuid from the recipient so that mistake
+ * cannot pass. The actor is `service:settlement`, which is what settlement's relay stamps when an
+ * emit names none — and `failedEvents` names none — so the payload is the only route that exists.
+ *
+ * **The wrong thing.** `refundable` decides whether the money is coming back or is held. Absent is
+ * held. The tests assert on the RENDERED SENTENCE and not only on a template id, because a template
+ * id is an identifier a refactor can move while the words stay wrong, and because the two sentences
+ * are the entire point of the distinction.
+ * ================================================================================================== */
+
+/** A uuid, and deliberately NOT a user's — this is the envelope key for this topic. */
+const WITHDRAWAL = '33333333-3333-4333-8333-333333333333'
+
+/** The exact payload `settlement/src/withdrawals.ts:537` builds. `undefined` omits the field. */
+function failedWithdrawal(refundable: unknown): Record<string, unknown> {
+  return {
+    withdrawalId: WITHDRAWAL,
+    userId: ALICE,
+    reason: 'the chain rejected the transaction',
+    ...(refundable === undefined ? {} : { refundable }),
+  }
+}
+
+/** Rendered as a user reads it, so a test can assert words rather than an identifier. */
+function sentence(event: Parameters<typeof outcomeOf>[1]): string {
+  const rule = RULES['settlement.outbound.failed']
+  assert.ok(rule)
+  const set = rule.recipients(event)
+  assert.equal(set.kind, 'recipients')
+  if (set.kind !== 'recipients') return ''
+  const outcome = outcomeOf(rule, event)
+  assert.ok(isTemplateId(outcome.templateId))
+  if (!isTemplateId(outcome.templateId)) return ''
+  const rendered = renderTemplate(
+    templateFor(outcome.templateId),
+    set.recipients[0].params,
+    DEFAULT_LOCALE,
+    'https://app.cloudsforge.test',
+  )
+  assert.deepEqual(rendered.missing, [], 'a failed-withdrawal notification must never have a gap in it')
+  return `${rendered.subject}\n${rendered.body}`
+}
+
+test('a failed withdrawal reaches the user settlement names, never the withdrawal id it is keyed by', () => {
+  const event = registeredEvent('settlement.outbound.failed', WITHDRAWAL, failedWithdrawal(false), {
+    // What settlement's relay actually stamps: `failedEvents` sets no actor, so the payload is the
+    // only route to a person. An `actor` fallback would find `service:settlement` and nobody.
+    actor: 'service:settlement',
+  })
+  const set = RULES['settlement.outbound.failed']?.recipients(event)
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients.length, 1)
+  assert.equal(set.recipients[0].userId, ALICE)
+  // The two assertions that catch a key fallback. Both are needed: the first fails if the key is
+  // preferred, the second states the thing that must never be true even if ALICE ever equals it.
+  assert.notEqual(set.recipients[0].userId, WITHDRAWAL)
+  assert.notEqual(set.recipients[0].userId, event.key)
+  assert.equal(set.recipients[0].subjectUrn, `cf:settlement:withdrawal:${WITHDRAWAL}`)
+})
+
+/**
+ * **Yesterday's payload, fed to today's reader.**
+ *
+ * This is the test that fails when the PRODUCER regresses rather than when this file changes. The
+ * shape below is exactly what `failedEvents` emitted before settlement added the field —
+ * `{ withdrawalId, reason, refundable }` — and every assertion above still passes against it if
+ * this rule ever acquires a fallback to the key or to the actor. It answers `no_recipient`, which
+ * is the honest "a producer to go and fix", and never a guess.
+ *
+ * An end-to-end test that only sent today's payload would stay green with the recipient logic
+ * deliberately broken, because an absent field is null to every reader. That has happened twice in
+ * this estate; this is the shape that catches it.
+ */
+test("yesterday's failure payload, with no userId, is no_recipient rather than a guess", () => {
+  const event = registeredEvent(
+    'settlement.outbound.failed',
+    WITHDRAWAL,
+    { withdrawalId: WITHDRAWAL, reason: 'the chain rejected the transaction', refundable: false },
+    { actor: 'service:settlement' },
+  )
+  assert.deepEqual(RULES['settlement.outbound.failed']?.recipients(event), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
+})
+
+test('a refundable failure says the money is coming back, and is high rather than critical', () => {
+  const event = registeredEvent('settlement.outbound.failed', WITHDRAWAL, failedWithdrawal(true), {
+    actor: 'service:settlement',
+  })
+  const rule = RULES['settlement.outbound.failed']
+  assert.ok(rule)
+  assert.deepEqual(outcomeOf(rule, event), {
+    priority: 'high',
+    templateId: 'withdrawal.failed_refunded',
+  })
+  const text = sentence(event)
+  assert.match(text, /coming back|being returned to your balance/)
+  assert.doesNotMatch(text, /still held/, 'the money is back; saying it is held is the other fact')
+  assert.match(text, new RegExp(WITHDRAWAL), 'the id a person quotes to support')
+  assert.match(text, /the chain rejected the transaction/, "the producer's reason, not a stock line")
+})
+
+test('a non-refundable failure says the money is held, is critical, and never suggests a retry', () => {
+  const event = registeredEvent('settlement.outbound.failed', WITHDRAWAL, failedWithdrawal(false), {
+    actor: 'service:settlement',
+  })
+  const rule = RULES['settlement.outbound.failed']
+  assert.ok(rule)
+  assert.deepEqual(outcomeOf(rule, event), {
+    priority: 'critical',
+    templateId: 'withdrawal.failed_held',
+  })
+  const text = sentence(event)
+  assert.match(text, /still held/)
+  assert.doesNotMatch(
+    text,
+    /coming back|being returned to your balance/,
+    'the expensive error: telling somebody their money is back while wallet is holding it',
+  )
+  // The payment may have left the platform. "Try again" here is an invitation to pay twice, and
+  // wallet refuses to refund for exactly that reason (wallet/src/withdrawals.ts, failWithdrawal).
+  assert.doesNotMatch(text, /You can request it again/)
+})
+
+/**
+ * The default, and the reason this rule has a `variant` rather than a ternary somebody wrote the
+ * right way round once.
+ *
+ * `refundable` is a required boolean on settlement's emit today, so an absent field means the
+ * producer regressed, a relay dropped it, or an older event is being replayed. Every one of those
+ * is a case where the truthful answer is "we do not know", and "we do not know" must read as HELD:
+ * `wallet/src/server.ts:875` refuses to refund without proof because refunding a payment that
+ * really landed pays the user twice, and `activity/src/classify.ts:192` mirrors it so a feed entry
+ * cannot contradict the balance on the same screen. This rule is the third reader and defaults the
+ * same way. The string and the number are here because `refundable` arriving over JSON from a
+ * producer that stringified it is the realistic near-miss, and `=== true` refuses all of them.
+ */
+test('an absent, string or numeric refundable reads as HELD — the only safe direction', () => {
+  const rule = RULES['settlement.outbound.failed']
+  assert.ok(rule)
+  for (const value of [undefined, 'true', 1, null, {}, 'yes']) {
+    const event = registeredEvent('settlement.outbound.failed', WITHDRAWAL, failedWithdrawal(value), {
+      actor: 'service:settlement',
+    })
+    assert.deepEqual(
+      outcomeOf(rule, event),
+      { priority: 'critical', templateId: 'withdrawal.failed_held' },
+      `refundable=${JSON.stringify(value)} must not be read as "the money is coming back"`,
+    )
+    assert.doesNotMatch(sentence(event), /coming back|being returned to your balance/)
+  }
+})
+
+test('a late withdrawal and a failed one are two notifications, not one deduped into silence', () => {
+  // settlement.withdrawal.stuck keys `withdrawal.failed:<id>`. If this rule reused that key, a
+  // withdrawal that went late and then failed would collapse into the "it is late" notification
+  // and the user would never hear how it ended. The disposition is in the key for that reason,
+  // and because a held failure later corrected to a refunded one must not dedupe into the thing
+  // it corrects.
+  const stuck = registeredEvent('settlement.withdrawal.stuck', 'ethereum:mainnet', {
+    withdrawalId: WITHDRAWAL,
+    userId: ALICE,
+  })
+  const held = registeredEvent('settlement.outbound.failed', WITHDRAWAL, failedWithdrawal(false), {
+    actor: 'service:settlement',
+  })
+  const refunded = registeredEvent('settlement.outbound.failed', WITHDRAWAL, failedWithdrawal(true), {
+    actor: 'service:settlement',
+  })
+  const keys = [stuck, held, refunded].map((event) => {
+    const set = RULES[event.topic]?.recipients(event)
+    assert.equal(set?.kind, 'recipients')
+    return set?.kind === 'recipients' ? set.recipients[0].dedupeKey : ''
+  })
+  assert.equal(new Set(keys).size, 3, `three facts, three keys: ${keys.join(', ')}`)
+  assert.deepEqual(keys, [
+    `withdrawal.failed:${WITHDRAWAL}`,
+    `withdrawal.failed_held:${WITHDRAWAL}`,
+    `withdrawal.failed_refunded:${WITHDRAWAL}`,
+  ])
+  // And a redelivery of the same failure is one key, so at-least-once delivery is still one alert.
+  const again = registeredEvent('settlement.outbound.failed', WITHDRAWAL, failedWithdrawal(false), {
+    actor: 'service:settlement',
+  })
+  assert.notEqual(again.id, held.id)
+  const set = RULES['settlement.outbound.failed']?.recipients(again)
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients[0].dedupeKey, keys[1])
 })

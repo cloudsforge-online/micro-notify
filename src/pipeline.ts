@@ -25,7 +25,7 @@
 
 import { backoffFor } from '@cloudsforge/jobs'
 import type { Logger, Metrics } from '@cloudsforge/telemetry'
-import { ERASURE_TOPICS, ruleFor, type Recipient } from './catalogue.ts'
+import { ERASURE_TOPICS, outcomeOf, ruleFor, type Recipient } from './catalogue.ts'
 import type { AdapterRegistry, OutboundMessage } from './channels.ts'
 import type { InboundEvent } from './events.ts'
 import {
@@ -242,10 +242,15 @@ export async function ingestEvent(
       return { kind: 'ignored', reason: set.reason } satisfies IngestOutcome
     }
 
+    // Resolved from the EVENT, not read off the rule: one topic can carry two facts, and
+    // `settlement.outbound.failed` is the one that does — `refundable` decides whether this is a
+    // critical "your money is held" or a high "it is coming back". See `Variant` in catalogue.ts.
+    const outcome = outcomeOf(rule, event)
+
     const created: string[] = []
     const suppressed: SuppressionReason[] = []
     for (const recipient of set.recipients) {
-      const result = await createNotification(tx, deps, requestFor(event, rule.category, rule.priority, rule.templateId, recipient))
+      const result = await createNotification(tx, deps, requestFor(event, rule.category, outcome.priority, outcome.templateId, recipient))
       if (result.kind === 'created') created.push(result.notificationId)
       else suppressed.push(result.reason)
     }
