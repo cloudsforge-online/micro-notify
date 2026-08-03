@@ -114,6 +114,14 @@ test('every unproduced notification names the producer that decided it', () => {
       'deposit detected, before confirmation',
       'risk limit reached',
       'service incident',
+      // Added when `micro-contracts` 41751b1 registered tessera's seven topics and all seven were
+      // put to the question that found market.offer.made — "does the envelope name only the person
+      // who acted?". Two said yes: `tessera.parcel.fallowed` names the challenger and not the owner
+      // losing the ground, `tessera.venue.booked` names the booker and not the owner being paid.
+      // Both are `blockedBy: 'no-subject'` against `micro-tessera`, and each needs one field off a
+      // row its emitting transaction already holds.
+      'somebody booked your venue',
+      'your parcel is being contested',
     ],
     'a recorded gap was added or removed — say which, and why, here',
   )
@@ -300,7 +308,8 @@ test('the two illegal actor spellings can never come back', () => {
 })
 
 /**
- * **Both `no-subject` records closed, within an hour of each other, and neither by this service.**
+ * **Both original `no-subject` records closed, within an hour of each other, and neither by this
+ * service.**
  *
  * The pair were the two that survived the purge of the five: real events from live producers whose
  * envelopes named nobody notify could address. Each needed ONE FIELD from a producer, each got it,
@@ -313,15 +322,39 @@ test('the two illegal actor spellings can never come back', () => {
  * That is the lesson worth keeping: `blockedBy: 'no-subject'` is the most PERISHABLE state a record
  * can be in, because the repair is a field rather than a design. Both were written as though they
  * would stand for weeks and both were false in hours.
+ *
+ * ## The blanket assertion that used to be here, and why it had to go
+ *
+ * This test opened with `filter(blockedBy === 'no-subject')` deep-equalling `[]` — "no such record
+ * may exist". It was true for about three hours, and it was **an incentive to hide a gap**: the
+ * next author to find a producer naming only its actor had the choice of recording it and turning
+ * this suite red, or saying nothing. Two more instances arrived that same night, from `tessera`,
+ * a producer that did not exist when the sentence was written. A guard that fails on an honest
+ * record and passes on an omission is pointed the wrong way round, which is the same criticism
+ * this file's own `staleGaps()` earned.
+ *
+ * What replaces it is narrower and can actually fail: the two named closures are pinned by name,
+ * and every SURVIVING `no-subject` record must be visible in both of the places a reader looks —
+ * no rule (or `contradictedGaps()` would fail), and an entry in `NON_NOTIFYING_TOPICS` explaining
+ * itself, so the topic is accepted at `/ingest` and appears in the coverage table rather than
+ * being silently unmapped. That pairing is the state `settlement.outbound.failed` was in while it
+ * was blocked, and the previous version of this test asserted none of it.
  */
 test('every no-subject record that a producer has since fixed is gone', () => {
-  assert.deepEqual(
-    UNPRODUCED_NOTIFICATIONS.filter((each) => each.blockedBy === 'no-subject').map(
-      (each) => each.emits,
-    ),
-    [],
-    'a no-subject record survives — check whether its producer has since named the subject',
-  )
+  for (const gap of UNPRODUCED_NOTIFICATIONS.filter((each) => each.blockedBy === 'no-subject')) {
+    const topic = gap.emits ?? ''
+    assert.equal(hasRule(topic), false, `${topic} has both a rule and a no-subject record`)
+    assert.ok(
+      Object.hasOwn(NON_NOTIFYING_TOPICS, topic),
+      `${topic} is recorded as blocked but is invisible to the coverage table — add the reason`,
+    )
+    assert.equal(isKnownTopic(topic), true, `${topic} must still be accepted at /ingest`)
+    assert.match(
+      NON_NOTIFYING_TOPICS[topic] ?? '',
+      /DEFERRED/,
+      `${topic}'s NON_NOTIFYING reason reads as a decision while its record calls it a deferral`,
+    )
+  }
   for (const topic of ['settlement.outbound.failed', 'market.offer.made']) {
     assert.equal(hasRule(topic), true, `${topic} named a subject; the rule it was owed is missing`)
     assert.equal(isKnownTopic(topic), true, `${topic} must be accepted at /ingest`)
@@ -331,10 +364,14 @@ test('every no-subject record that a producer has since fixed is gone', () => {
       `${topic} is both mapped and recorded as not notifying`,
     )
   }
-  // market's is ahead of the registry, so it is quarantined with the spec that registers it — the
-  // legitimate state AWAITING_REGISTRATION exists to make visible, rather than an invisible one.
-  assert.equal(isRegisteredTopic('market.offer.made'), false)
-  assert.ok(Object.hasOwn(AWAITING_REGISTRATION, 'market.offer.made'))
+  // market's was ahead of the registry for about two hours, quarantined with the spec that would
+  // register it — the legitimate state AWAITING_REGISTRATION exists to make visible rather than an
+  // invisible one. `micro-contracts` 5e0d11a pasted that spec, `adoptedProposals()` turned this
+  // suite red, and the entry is deleted. Both topics are registered now, and BOTH are asserted:
+  // this is the assertion that was inverted by the registration, so it is the one that proves the
+  // deletion happened rather than the quarantine quietly keeping an adopted entry.
+  assert.equal(isRegisteredTopic('market.offer.made'), true)
+  assert.equal(Object.hasOwn(AWAITING_REGISTRATION, 'market.offer.made'), false)
   assert.equal(isRegisteredTopic('settlement.outbound.failed'), true)
 })
 

@@ -8,11 +8,13 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { TOPIC_NAMES } from '@cloudsforge/contracts-events'
+import { TOPIC_NAMES, isRegisteredTopic } from '@cloudsforge/contracts-events'
 import {
   MAPPED_TOPICS,
   NON_NOTIFYING_TOPICS,
   RULES,
+  hasRule,
+  isKnownTopic,
   outcomeOf,
   outcomesOf,
   ruleFor,
@@ -800,4 +802,186 @@ test('two offers on one listing are two notifications, not one deduped into sile
   assert.equal(first.recipients[0].dedupeKey, 'market.offer_received:offer-1')
   assert.equal(second.recipients[0].dedupeKey, 'market.offer_received:offer-2')
   assert.notEqual(first.recipients[0].dedupeKey, second.recipients[0].dedupeKey)
+})
+
+/* ==================================================================================================
+ * tessera — seven topics registered at once, and the same question asked of all seven.
+ *
+ * The question is the one that found `market.offer.made`: **does the envelope name only the person
+ * who acted?** Three of the seven produced rules, and each of the three is here because a generic
+ * recipient helper would have got it wrong or resolved nobody at all. The other four have no rule
+ * and are asserted as such — two decisions and two deferrals, which `topics.test.ts` separates.
+ * ================================================================================================== */
+
+const PARCEL = '66666666-6666-4666-8666-666666666666'
+const OBJECT = '77777777-7777-4777-8777-777777777777'
+
+/** The payload `tessera/src/kiln.ts` builds on the ANCHORED emit. Note the actor. */
+function anchoredEvent(authorSubject: unknown) {
+  return unregisteredEvent(
+    'tessera.object.anchored',
+    OBJECT,
+    {
+      objectId: OBJECT,
+      ...(authorSubject === undefined ? {} : { authorSubject }),
+      checksum: 'sha256-abc',
+      transactionHash: '0xdeadbeef',
+      blockNumber: 4_242,
+    },
+    // `system`, which is the whole point of the test below.
+    { actor: 'system', producer: 'tessera' },
+  )
+}
+
+/**
+ * The rule `forUser` could not have written, and the reason is structural rather than stylistic.
+ *
+ * `userIdOf` has three routes to a person and this envelope defeats all three: no `user_id` on the
+ * payload, a registry `keyedBy` of `object_id` rather than `user_id`, and an actor of `system`
+ * rather than `user:<id>`. So `forUser` returns `no_recipient` on every anchor, for ever, while
+ * `hasRule` reports the topic as covered — the exact "reports itself as delivered" shape that the
+ * fifteen deleted rules had. Reading `authorSubject` explicitly is not a preference here.
+ */
+test('an anchored object notifies its author, from a payload whose actor is system', () => {
+  const set = RULES['tessera.object.anchored']?.recipients(anchoredEvent(`user:${ALICE}`))
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients.length, 1)
+  assert.equal(set.recipients[0].userId, ALICE)
+  assert.equal(set.recipients[0].params['transactionHash'], '0xdeadbeef')
+  // A number on the payload, rendered as a string: `str` accepts numbers, and a blanked block
+  // number would make the sentence unverifiable rather than merely terse.
+  assert.equal(set.recipients[0].params['blockNumber'], '4242')
+  assert.equal(set.recipients[0].subjectUrn, `cf:tessera:object:${OBJECT}`)
+  assert.equal(set.recipients[0].dedupeKey, `tessera.object_anchored:${OBJECT}`)
+})
+
+test('an anchor with no author is no_recipient, never the system actor', () => {
+  assert.deepEqual(RULES['tessera.object.anchored']?.recipients(anchoredEvent(undefined)), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
+  // And the `system` actor must not be read as a principal that is "not a person" — the producer
+  // regressed, and `not_applicable` would hide that behind a metric an operator reads as healthy.
+  assert.deepEqual(RULES['tessera.object.anchored']?.recipients(anchoredEvent(ALICE)), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
+})
+
+test('a fired object notifies its author and is keyed on the object, not the checksum', () => {
+  const event = unregisteredEvent(
+    'tessera.object.fired',
+    OBJECT,
+    {
+      objectId: OBJECT,
+      authorSubject: `user:${ALICE}`,
+      checksum: 'sha256-abc',
+      category: 'sculpture',
+      footprint: 4,
+      c2pa: true,
+    },
+    { actor: `user:${ALICE}`, producer: 'tessera' },
+  )
+  const set = RULES['tessera.object.fired']?.recipients(event)
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients[0].userId, ALICE)
+  assert.equal(set.recipients[0].params['objectCategory'], 'sculpture')
+  // Two people can fire byte-identical objects — `completeFiring` marks the second a duplicate —
+  // so a checksum-keyed dedupe would silence one of them. The object id is per firing.
+  assert.equal(set.recipients[0].dedupeKey, `tessera.object_fired:${OBJECT}`)
+  assert.notEqual(set.recipients[0].dedupeKey, 'tessera.object_fired:sha256-abc')
+})
+
+/** `resolveContest` emits this: actor `system`, `fromSubject` the dispossessed owner. */
+function transferEvent(reason: string, from: unknown) {
+  return unregisteredEvent(
+    'tessera.parcel.transferred',
+    PARCEL,
+    {
+      parcelId: PARCEL,
+      wardId: 'ward-1',
+      ...(from === undefined ? {} : { fromSubject: from }),
+      toSubject: `user:${BOB}`,
+      reason,
+      tier: 'plot',
+    },
+    { actor: reason === 'contest' ? 'system' : `user:${ALICE}`, producer: 'tessera' },
+  )
+}
+
+/**
+ * The transfer rule addresses the LOSER, and the winner is refused by name.
+ *
+ * Both subjects are on this payload, which makes it the easiest of the three to get backwards:
+ * `toSubject` is the person the event is grammatically "about" and is the wrong one. The person
+ * who needs telling held ground for four months and lost it to a clock they were not watching.
+ */
+test('a contested parcel notifies the owner who lost it, never the challenger who won it', () => {
+  const set = RULES['tessera.parcel.transferred']?.recipients(transferEvent('contest', `user:${ALICE}`))
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients.length, 1)
+  assert.equal(set.recipients[0].userId, ALICE)
+  assert.notEqual(set.recipients[0].userId, BOB, 'the challenger, from toSubject')
+  assert.notEqual(set.recipients[0].userId, PARCEL, 'the envelope key is the parcel')
+  assert.equal(set.recipients[0].params['parcelId'], PARCEL)
+  assert.equal(set.recipients[0].params['wardId'], 'ward-1')
+  // Parcel AND user: one parcel can be lost, reclaimed and lost again, and each loss is news.
+  assert.equal(set.recipients[0].dedupeKey, `tessera.parcel_lost:${PARCEL}:${ALICE}`)
+})
+
+test('a traded parcel is not_applicable — two people agreed to it and are both looking at it', () => {
+  assert.deepEqual(RULES['tessera.parcel.transferred']?.recipients(transferEvent('trade', `user:${ALICE}`)), {
+    kind: 'none',
+    reason: 'not_applicable',
+  })
+  // An unrecognised reason is also not_applicable rather than a guess: the rule's whole premise is
+  // "the reader did not act", and only `contest` proves that. `tessera/src/world.ts` types the
+  // field `'trade' | 'contest'`, so a third value is a producer change this rule has not been
+  // shown to be correct for.
+  assert.deepEqual(RULES['tessera.parcel.transferred']?.recipients(transferEvent('', `user:${ALICE}`)), {
+    kind: 'none',
+    reason: 'not_applicable',
+  })
+  // But a CONTEST with no `fromSubject` is no_recipient — the producer dropped the field, which is
+  // a fault, and must not be filed under the same "nothing to do" reason as a trade.
+  assert.deepEqual(RULES['tessera.parcel.transferred']?.recipients(transferEvent('contest', undefined)), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
+})
+
+/**
+ * The four tessera topics with no rule, and the assertion that they are DECIDED rather than missed.
+ *
+ * `unmappedRegistryTopics()` already fails on a registered topic that is neither mapped nor
+ * recorded, so this adds the half that check cannot see: that each of the four is in exactly one
+ * of the two tables, never both, and that the two deferrals are the two whose envelopes name only
+ * the actor. Naming them here is what makes a future rule for one of them a deliberate edit.
+ */
+test('the four tessera topics with no rule are each recorded, and never both mapped and recorded', () => {
+  for (const topic of [
+    'tessera.parcel.claimed',
+    'tessera.ward.opened',
+    'tessera.parcel.fallowed',
+    'tessera.venue.booked',
+  ]) {
+    assert.equal(hasRule(topic), false, `${topic} is recorded as not notifying AND mapped`)
+    assert.ok(Object.hasOwn(NON_NOTIFYING_TOPICS, topic), `${topic} has no rule and no reason`)
+    assert.equal(isKnownTopic(topic), true, `${topic} must still be accepted at /ingest`)
+  }
+  // And all seven are registered, so none of them is riding the quarantine.
+  for (const topic of [
+    'tessera.parcel.claimed',
+    'tessera.parcel.fallowed',
+    'tessera.parcel.transferred',
+    'tessera.object.fired',
+    'tessera.object.anchored',
+    'tessera.ward.opened',
+    'tessera.venue.booked',
+  ]) {
+    assert.equal(isRegisteredTopic(topic), true, `${topic} is not in the registry`)
+  }
 })

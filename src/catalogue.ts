@@ -225,6 +225,47 @@ function userIdOf(event: InboundEvent): string | null {
 }
 
 /**
+ * A SUBJECT resolved to the user id a notification row is keyed on — or to which kind of nobody.
+ *
+ * ## Why this is not `slice('user:'.length)` at each call site
+ *
+ * A subject is `user:<uuid>`, `service:<name>`, `operator:<id>` or `system` (04-domain-model §0),
+ * and slicing without checking the prefix turns `service:mint` into a "user id" of `mint`. That
+ * row is well-formed, insertable and filed against a user who does not exist — the custody defect
+ * in its consumer-side form, and a real possibility here rather than a hypothetical: a market
+ * listing may be owned by a service principal (`market/src/server.ts:713` takes the seller from
+ * `subjectOf(principal)`), and a tessera parcel by whatever `ensureAccount` was handed.
+ *
+ * ## The two "nobody" answers, which must not collapse
+ *
+ * `not_applicable` means the producer said exactly who, and the answer is that they are not a
+ * person to interrupt. `no_recipient` means the producer stopped spelling a subject — a bare uuid
+ * is the likely form — and is a producer to go and fix. Returning `not_applicable` for a malformed
+ * subject would swallow every affected notification while reporting the rule as working, which is
+ * the "reports itself as delivered" failure this catalogue exists to make impossible. So an
+ * unrecognised prefix is `no_recipient`, and only the three RECOGNISED non-user principals are
+ * `not_applicable`.
+ *
+ * The `none` arm is deliberately shaped to be assignable to `RecipientSet`, so a caller returns it
+ * unchanged rather than re-deriving a reason it might get wrong.
+ */
+export type SubjectResolution =
+  | { readonly kind: 'user'; readonly userId: string }
+  | { readonly kind: 'none'; readonly reason: 'not_applicable' | 'no_recipient' }
+
+export function userOfSubject(subject: string): SubjectResolution {
+  if (!subject) return { kind: 'none', reason: 'no_recipient' }
+  if (!subject.startsWith('user:')) {
+    const known =
+      subject.startsWith('service:') || subject.startsWith('operator:') || subject === 'system'
+    return { kind: 'none', reason: known ? 'not_applicable' : 'no_recipient' }
+  }
+  const userId = subject.slice('user:'.length)
+  // `user:` with nothing after it is malformed, not a principal. Never `not_applicable`.
+  return userId ? { kind: 'user', userId } : { kind: 'none', reason: 'no_recipient' }
+}
+
+/**
  * identity's revocation reasons, in words a person can act on.
  *
  * The producer's vocabulary, not a guess: `identity/src/server.ts:960`, `:1032`, `:1095`, `:1104`
@@ -800,23 +841,13 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     templateId: 'market.offer_received',
     why: 'A seller with an offer nobody told them about is a sale that does not happen. The offer holds the buyer\'s money in escrow while it waits, so silence costs both sides.',
     recipients: (event: InboundEvent): RecipientSet => {
-      const seller = str(event.payload, ['seller_subject', 'sellerSubject'], '')
-      if (!seller) return { kind: 'none', reason: 'no_recipient' }
-      // Never `slice` without checking the prefix: `service:mint` would become a "user id" of
-      // `mint`, and the row would be filed against a user that does not exist.
-      if (!seller.startsWith('user:')) {
-        // A RECOGNISED non-user principal is `not_applicable` — the producer said exactly who the
-        // seller is and the answer is that they are not a person. Anything else is a producer that
-        // has stopped spelling a subject (a bare uuid, most likely) and is `no_recipient`, because
-        // the two must not collapse: `not_applicable` on a malformed subject would silently swallow
-        // every offer notification while reporting the rule as working, which is precisely the
-        // "reports itself as delivered" failure this catalogue exists to make impossible.
-        const known =
-          seller.startsWith('service:') || seller.startsWith('operator:') || seller === 'system'
-        return { kind: 'none', reason: known ? 'not_applicable' : 'no_recipient' }
-      }
-      const userId = seller.slice('user:'.length)
-      if (!userId) return { kind: 'none', reason: 'no_recipient' }
+      // `userOfSubject` rather than a slice, and its comment carries the argument. This rule was
+      // where that branch was first written; it is shared now because tessera needed the identical
+      // three-way answer and a security-relevant branch copied four times is a branch that will
+      // eventually differ in one copy.
+      const seller = userOfSubject(str(event.payload, ['seller_subject', 'sellerSubject'], ''))
+      if (seller.kind === 'none') return seller
+      const userId = seller.userId
       const offerId = str(event.payload, ['offer_id', 'offerId'], event.id)
       return {
         kind: 'recipients',
@@ -1049,6 +1080,134 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     },
   }),
 
+  /* --------------------------------------------------------- tessera
+   *
+   * Seven topics were registered at once (`micro-contracts` 41751b1), so seven decisions were
+   * taken at once, and each was taken by asking the SAME question that found `market.offer.made`:
+   * **does this envelope name only the person who acted?**
+   *
+   * Three answers came back:
+   *
+   *   - Three name somebody who is not the actor, or an actor who has genuinely left. Those are
+   *     the rules below.
+   *   - Two name the actor and nobody else because there is nobody else — the reader did the thing
+   *     on purpose and is looking at the result, or the fact has no individual subject at all.
+   *     `NON_NOTIFYING_TOPICS`.
+   *   - **Two name only the actor while the news belongs to somebody they have never met.** Those
+   *     get no rule, because a rule would answer `no_recipient` for ever or address the wrong
+   *     person. They are recorded in `topics.ts`'s `UNPRODUCED_NOTIFICATIONS` as `no-subject`
+   *     against `micro-tessera`, which is the same shape and the same repair as market's offer —
+   *     one field off a row the emitting transaction already holds.
+   */
+
+  'tessera.object.fired': Object.freeze({
+    category: 'ownership',
+    priority: 'normal',
+    templateId: 'tessera.object_fired',
+    why: 'A firing is queued work, not a click. `tessera/src/kiln.ts` beginFiring "returns immediately with a `firing` row; the job does the work", and the job leases on `owner:<subject>` (jobs.ts, KILN_FIRE_KIND) so ONE PLAYER\'S FIRINGS SERIALISE — a player who queues five waits through all five. That is the condition worlds.provision.completed wrote down as the thing that would earn a rule ("if provisioning ever becomes slow enough to leave"), met on arrival rather than later.',
+    // The actor here IS the author (`user:${authorSubject.slice(...)}` at the emit), so `forUser`
+    // would work today. It is still not used: the author is a payload FIELD and the actor is an
+    // accident of who happened to trigger the job, and `tessera.object.anchored` below proves the
+    // point by emitting the same fact with `actor: 'system'`. Two sibling topics resolved two
+    // different ways is how one of them silently becomes wrong.
+    recipients: (event: InboundEvent): RecipientSet => {
+      const author = userOfSubject(str(event.payload, ['author_subject', 'authorSubject'], ''))
+      if (author.kind === 'none') return author
+      const objectId = str(event.payload, ['object_id', 'objectId'], event.key)
+      return {
+        kind: 'recipients',
+        recipients: [
+          {
+            userId: author.userId,
+            params: {
+              objectCategory: str(event.payload, ['category'], 'object'),
+              checksum: str(event.payload, ['checksum'], ''),
+            },
+            // The object, not the event: a redelivery of one firing is one piece of news. Not the
+            // checksum — two identical objects fired by two people share one, and `completeFiring`
+            // marks the second a duplicate rather than a separate firing.
+            dedupeKey: `tessera.object_fired:${objectId}`,
+            subjectUrn: `cf:tessera:object:${objectId}`,
+          },
+        ],
+      }
+    },
+  }),
+
+  'tessera.object.anchored': Object.freeze({
+    category: 'ownership',
+    priority: 'normal',
+    templateId: 'tessera.object_anchored',
+    why: 'An on-chain anchor confirms in a block, on a timescale nobody watches, and it is the point at which authorship becomes provable without this platform. The author asked for it and left.',
+    // **`forUser` is impossible here, not merely unwise.** The emit sets `actor: 'system'`
+    // (tessera/src/kiln.ts, the ANCHORED emit), the registry keys this topic by `object_id` rather
+    // than `user_id`, and the payload carries no `user_id` — so all three of `userIdOf`'s routes
+    // miss and it returns null. The rule would have resolved nobody, for ever, while the coverage
+    // test counted it. `authorSubject` is read explicitly, and tessera's own emit comment says why
+    // it is there: "the audit table's subjectKind: 'user' reads THIS field, not the envelope key".
+    recipients: (event: InboundEvent): RecipientSet => {
+      const author = userOfSubject(str(event.payload, ['author_subject', 'authorSubject'], ''))
+      if (author.kind === 'none') return author
+      const objectId = str(event.payload, ['object_id', 'objectId'], event.key)
+      return {
+        kind: 'recipients',
+        recipients: [
+          {
+            userId: author.userId,
+            params: {
+              transactionHash: str(event.payload, ['transaction_hash', 'transactionHash'], ''),
+              blockNumber: str(event.payload, ['block_number', 'blockNumber'], ''),
+            },
+            dedupeKey: `tessera.object_anchored:${objectId}`,
+            subjectUrn: `cf:tessera:object:${objectId}`,
+          },
+        ],
+      }
+    },
+  }),
+
+  'tessera.parcel.transferred': Object.freeze({
+    category: 'ownership',
+    priority: 'high',
+    templateId: 'tessera.parcel_lost',
+    why: 'A contest takes ground off its owner while they are not there — that is the entire premise: a parcel is only contestable after 90 days fallow plus 30. The loser did nothing, is told by nothing else, and finds out by opening Tessera and looking for land that is gone.',
+    // Two subjects on the payload and only ONE of them is notified, which is a decision rather than
+    // an oversight:
+    //
+    //   - `reason: 'contest'` — `resolveContest` emits with `actor: 'system'` and `fromSubject` is
+    //     the dispossessed owner. Nobody acted on their behalf and nobody told them.
+    //   - `reason: 'trade'` — both parties agreed to a transfer they are both looking at.
+    //     `not_applicable`, on the emberkin.cosmetic.equipped precedent: confirming a thing two
+    //     people just did on purpose is the noise that trains them to ignore this channel.
+    //
+    // The WINNER of a contest is not notified either, under both readings: they opened the contest,
+    // they are waiting for it, and the 30-day clock was theirs to watch.
+    recipients: (event: InboundEvent): RecipientSet => {
+      if (str(event.payload, ['reason'], '') !== 'contest') {
+        return { kind: 'none', reason: 'not_applicable' }
+      }
+      const loser = userOfSubject(str(event.payload, ['from_subject', 'fromSubject'], ''))
+      if (loser.kind === 'none') return loser
+      const parcelId = str(event.payload, ['parcel_id', 'parcelId'], event.key)
+      return {
+        kind: 'recipients',
+        recipients: [
+          {
+            userId: loser.userId,
+            params: {
+              parcelId,
+              wardId: str(event.payload, ['ward_id', 'wardId'], ''),
+            },
+            // The parcel and the loser together: one parcel can be lost, reclaimed and lost again,
+            // and each loss is real news. Keying on the parcel alone would silence the second.
+            dedupeKey: `tessera.parcel_lost:${parcelId}:${loser.userId}`,
+            subjectUrn: `cf:tessera:parcel:${parcelId}`,
+          },
+        ],
+      }
+    },
+  }),
+
   /* --------------------------------------------------------- platform */
 
 } satisfies Readonly<Record<string, Rule>>)
@@ -1140,6 +1299,20 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
   // The two that remain are settlement talking to wallet or to reconciliation, not to a person.
   'settlement.outbound.confirmed':
     "wallet's own narrow name for the same movement settlement.withdrawal.completed announces (settlement/src/withdrawals.ts:437 and :449 emit both from one function). It exists to release the reservation at wallet/src/server.ts:846 and carries a withdrawal id, a hash and a timestamp. A rule here as well would tell one user their withdrawal arrived twice. Note that this is NOT the shape of the failure twin, which had no user-facing counterpart at all and is now mapped: a second rule here would duplicate a notification, whereas the failure had none.",
+  // ── tessera ────────────────────────────────────────────────────────────────────────────────
+  // Four of the seven, and they are here for TWO different reasons that must not be read as one.
+  // The first two are decisions: the fact reaches nobody because there is nobody it is news to.
+  // The last two are DEFERRALS, and each carries a matching `no-subject` record in `topics.ts`
+  // naming `micro-tessera` as the owner — the same pairing `settlement.outbound.failed` had while
+  // it was blocked, and the reason it stopped being blocked in an hour.
+  'tessera.parcel.claimed':
+    'The claimant claimed it, in the client, and is standing on the ground they just took — land is free and the claim is synchronous (world.ts, the emit is inside the same transaction as the insert). aetherholm.city.founded exactly. The only other party is the ward, which is not a person.',
+  'tessera.ward.opened':
+    'A world event with no individual subject: the payload is a ward id, a slug, an archetype, an ordinal and a tile count, and names no user at all. Opening a ward is inventory, announced when it is worth announcing through /admin/broadcasts. aetherholm.season.opened.',
+  'tessera.parcel.fallowed':
+    "DEFERRED, not declined. The payload is `{ parcelId, contestId, challengerSubject }` and the actor is the challenger, so every route to a person on this envelope resolves the person CONTESTING the parcel. The reader who needs it is the current owner, who is about to lose ground they hold and is named nowhere — a rule today would tell the challenger they had challenged. See UNPRODUCED_NOTIFICATIONS, `blockedBy: 'no-subject'`, owner micro-tessera.",
+  'tessera.venue.booked':
+    "DEFERRED, not declined. `bookedBy` is on the payload and is the actor as well, so the only resolvable person is the one who made the booking and is looking at their confirmation. The parcel's owner — whose calendar this fills and whose venue this pays for — is named nowhere on the envelope. See UNPRODUCED_NOTIFICATIONS, `blockedBy: 'no-subject'`, owner micro-tessera.",
   'settlement.sweep.completed':
     "A deposit address emptied into the pinned treasury. No user balance changes — wallet credited the deposit when it confirmed, long before the sweep — so there is nothing here a person could act on or would recognise. It exists for reconciliation, which is the one movement no other topic reports, and it is keyed by the sweep source rather than by anybody.",
 })

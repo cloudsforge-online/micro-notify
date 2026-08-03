@@ -374,6 +374,50 @@ export const TEMPLATES = Object.freeze({
     ),
   }),
 
+  /* ------------------------------------------------------------------ tessera */
+
+  // All three are `ownership`, and none of them is a confirmation of a thing the reader just did.
+  // That is the test every tessera topic was put to: five of the seven registered topics either
+  // announce the reader's own deliberate act or name nobody at all, and they have no template here
+  // because they have no rule — see `NON_NOTIFYING_TOPICS` and `UNPRODUCED_NOTIFICATIONS`.
+
+  'tessera.object_fired': Object.freeze({
+    id: 'tessera.object_fired',
+    category: 'ownership',
+    params: ['objectCategory', 'checksum'],
+    path: '/tessera/kiln',
+    // The checksum is in the body rather than the subject: it is how the object is addressed
+    // (`tessera/src/kiln.ts` content-addresses by the sha256 of its own bytes) but it is not a
+    // sentence anybody reads. The category is, and it is what tells five queued firings apart.
+    text: en(
+      'Your {{objectCategory}} came out of the Kiln',
+      'The Kiln finished firing your {{objectCategory}}.\n\nIt is addressed by the checksum of its own bytes: {{checksum}}. It can be placed on a parcel now, and anchored on-chain whenever you want a permanent record of it.',
+    ),
+  }),
+  'tessera.object_anchored': Object.freeze({
+    id: 'tessera.object_anchored',
+    category: 'ownership',
+    params: ['transactionHash', 'blockNumber'],
+    path: '/tessera/objects',
+    text: en(
+      'Your object is anchored on-chain',
+      'The anchor confirmed in block {{blockNumber}}, transaction {{transactionHash}}.\n\nThe checksum of the object is now on a chain nobody controls, so authorship can be proved without this platform.',
+    ),
+  }),
+  'tessera.parcel_lost': Object.freeze({
+    id: 'tessera.parcel_lost',
+    category: 'ownership',
+    params: ['parcelId', 'wardId'],
+    path: '/tessera/parcels',
+    // Says WHY, because the reader did nothing and will otherwise read this as a platform error.
+    // A contest is only openable against a parcel that has already been fallow — the sentence has
+    // to carry that, or "your land was taken" is the whole of what they learn.
+    text: en(
+      'A parcel of yours changed hands after a contest',
+      'Parcel {{parcelId}} in ward {{wardId}} is no longer yours.\n\nIt had gone fallow — no visitor and no edit for 90 days — and was contested 30 days after that. The contest resolved in the challenger\'s favour.\n\nA Homestead can never be contested. Everything you built on the parcel is still yours and still in your objects.',
+    ),
+  }),
+
   /* ------------------------------------------------------------------ platform */
 
   'system.incident': Object.freeze({

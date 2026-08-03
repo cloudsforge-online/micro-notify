@@ -80,7 +80,7 @@
  * distinction is what `blockedBy` carries, and it is why "the producer emits it" was never on its
  * own enough to write a rule.
  *
- * ## And one of those two has since closed, which is the fourth thing this file has learned
+ * ## And both of those two have since closed, which is the fourth thing this file has learned
  *
  * `settlement.outbound.failed` is a rule now. Its record said the envelope named nobody; settlement
  * put `userId` on the payload (`settlement/src/withdrawals.ts:537`) and the sentence stopped being
@@ -89,9 +89,15 @@
  * code contradicting it. That is the property the five deleted records did not have, working, in
  * the one repository that can see it.
  *
- * `market.offer.made` has NOT closed and is checked, not assumed: `market/src/bids.ts:432` still
- * emits `{ listingId, offerId, offererSubject, amount, assetCode }` with no seller on it, while
- * `bids.ts:399` reads `listing.sellerSubject` thirty lines above to refuse shill bidding. One field.
+ * `market.offer.made` closed the same way and within the hour. This paragraph used to read "has NOT
+ * closed and is checked, not assumed", citing `bids.ts:432` for an envelope of
+ * `{ listingId, offerId, offererSubject, amount, assetCode }` with no seller on it. That was true
+ * when written and is now false twice over: `market/src/bids.ts:477` sends `sellerSubject`, read
+ * off the listing row the emitting transaction holds `for update`, and the line numbers had drifted
+ * besides. Both are the warning this file's own header gives about `path:line` citations — a prose
+ * paragraph is the one part of this file nothing can fail on, so it is the part that rots. What is
+ * checked rather than written is in `topics.test.ts`, "every no-subject record that a producer has
+ * since fixed is gone", which asserts the rule exists and the record does not.
  */
 
 import {
@@ -136,32 +142,23 @@ export interface ProposedTopic {
  * quarantine working, not a regression this commit introduced." It was right: this repository's
  * suite went red for exactly that, and these are the deletions it was asking for.
  *
- * It emptied, and then it was used again within the hour — which is the best evidence that the
- * situation it exists for is normal rather than exceptional. `market.offer.made` is the entry, and
- * it is the mechanism at its most useful: a record in `UNPRODUCED_NOTIFICATIONS` said the rule
- * could not be written, `micro-market` supplied the field that made it writable, and the topic is
- * still unregistered. Without this table the choice would be between a rule nothing can see is
- * ahead of the registry and a record that has stopped being true.
+ * It emptied, and then it was used again within the hour, and then it emptied a second time — which
+ * is the best evidence that the situation it exists for is normal rather than exceptional.
+ * `market.offer.made` was that second entry, and it was the mechanism at its most useful: a record
+ * in `UNPRODUCED_NOTIFICATIONS` said the rule could not be written, `micro-market` supplied the
+ * field that made it writable, and the topic was still unregistered. Without this table the choice
+ * would have been between a rule nothing can see is ahead of the registry and a record that has
+ * stopped being true. `micro-contracts` registered it two hours later (5e0d11a, pasting the spec
+ * and re-reading `keyedBy` off `market/src/bids.ts:450`), `adoptedProposals()` turned this suite
+ * red, and the entry is gone. The rule stays: it is a registered topic now, so
+ * `unregisteredRuleTopics()` is what holds it, and `catalogue.ts:797` carries the reasoning.
  *
- * The spec is copied VERBATIM from `market/src/topics.ts`'s own quarantine, so `micro-contracts`
- * adopting it is a paste and the two repositories cannot propose two different contracts for one
- * topic.
+ * The spec of every entry is copied VERBATIM from the producing service's own quarantine, so
+ * `micro-contracts` adopting it is a paste and the two repositories cannot propose two different
+ * contracts for one topic. That held: contracts' own commit says the description it registered is
+ * "character for character theirs".
  */
-export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({
-  'market.offer.made': {
-    reason:
-      "A seller with an offer nobody told them about is a sale that does not happen, and the buyer's money sits in escrow while it waits. This service declined the rule for the life of the service — correctly, because the envelope named only the OFFERER and a rule keyed to it would have told them their own offer arrived. market/src/bids.ts:477 now sends `sellerSubject`, read off the listing row the emitting transaction already holds `for update`, so it is the seller at the moment the offer was made. The rule reads it explicitly rather than through `forUser`, because the envelope actor is the offerer.",
-    emittedAt: 'market/src/bids.ts:449',
-    spec: {
-      producer: 'market',
-      payloadType: 'OfferMade',
-      version: '1.0',
-      keyedBy: 'listing_id',
-      description:
-        'A buyer made an offer on a listing. Carries the seller as well as the offerer: the notification this event exists for goes to the person who did not act.',
-    },
-  },
-})
+export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({})
 
 /**
  * An AD-08 notification this service cannot produce, and the ONE reason why.
@@ -284,6 +281,36 @@ export const UNPRODUCED_NOTIFICATIONS: readonly UnproducedNotification[] = Objec
    * `status: 'deferred'`, with an `until` reading "market's OFFER_MADE payload carries the seller
    * subject". It does. That entry needs deleting too, and it is not in this repository's gift.
    * ──────────────────────────────────────────────────────────────────────────────────────────── */
+  /* ────────────────────────────────────────────────────────────────────────────────────────────
+   * The two below are NEW, and adding a `no-subject` record hours after congratulating this file
+   * on emptying the last two is the honest outcome rather than an embarrassing one. `micro-org`'s
+   * sweep found the class by asking one question of every topic in the estate — "does the envelope
+   * name only the person who acted?" — and `micro-contracts` 41751b1 registered seven tessera
+   * topics at once. Asking that question of all seven found two more instances of the identical
+   * defect, in a producer that had not existed when the previous two were written.
+   *
+   * That is the class being findable rather than the class recurring, and the repair is the same
+   * one field off a row the emitting transaction already holds. Both are `micro-tessera`'s, and
+   * neither is in this repository's gift.
+   * ──────────────────────────────────────────────────────────────────────────────────────────── */
+  Object.freeze({
+    requirement: 'your parcel is being contested',
+    guessedTopic: 'tessera.parcel.contested',
+    emits: 'tessera.parcel.fallowed',
+    blockedBy: 'no-subject',
+    owner: 'micro-tessera',
+    evidence:
+      "tessera/src/world.ts, `openContest` — the emit's payload is `{ parcelId, contestId, challengerSubject }` and its actor is `user:<challenger>`, so both subjects on the envelope are the CHALLENGER and the key is the parcel. The owner about to lose the ground is on the `parcels` row and is not read: the insert is `values (${input.parcelId}, ${input.challengerSubject})` and nothing selects `owner_subject`. One field — `ownerSubject`, off the parcel row — and the rule is writable, exactly as `sellerSubject` was for market.offer.made. Losing land you have held for four months with no warning is the clearest AD-08 case tessera has.",
+  }),
+  Object.freeze({
+    requirement: 'somebody booked your venue',
+    guessedTopic: 'tessera.venue.booked_for_owner',
+    emits: 'tessera.venue.booked',
+    blockedBy: 'no-subject',
+    owner: 'micro-tessera',
+    evidence:
+      "tessera/src/economy.ts, the VENUE_BOOKED emit — payload `{ bookingId, parcelId, slot, bookedBy, priceWei, reservationId }`, actor `user:<bookedBy>`. `bookedBy` is the booker, who is looking at their own confirmation; the parcel's OWNER is being paid `priceWei` and having their calendar filled, and appears nowhere. The row the transaction inserts against carries `parcel_id`, so the owner is one join from the emit site. Note the booker is correctly NOT the recipient: a rule reading `bookedBy` would pass every test and notify the wrong person, which is the failure mode market.offer.made would have shipped.",
+  }),
   Object.freeze({
     requirement: 'auction ended',
     guessedTopic: 'market.auction.ended',
