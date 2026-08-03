@@ -276,8 +276,9 @@ export const TEMPLATES = Object.freeze({
     category: 'api',
     params: ['keyDisplay', 'project', 'at'],
     path: '/developers/keys',
-    // The DISPLAY (`cfk_live_…`), never the key. devplatform's own emit says so at apikeys.ts:272,
-    // and the display is the value an operator finds in a log line and revokes by.
+    // The DISPLAY (`cfk_live_…`), never the key. devplatform's own emit says so — `emitKeyIssued`
+    // in `devplatform/src/apikeys.ts` is documented as carrying "the DISPLAY, never the key" — and
+    // the display is the value an operator finds in a log line and revokes by.
     text: en(
       'A new API key was created',
       'API key {{keyDisplay}} was created for project {{project}} at {{at}}.\n\nAn API key acts as you. If this was not you, revoke it now and change your password.',

@@ -17,17 +17,26 @@
  * written" — and by the time this file was added, eleven of the fifteen had a producer that was
  * very much written and emitting a **different name**:
  *
+ * Each cites the producer by a NAME rather than by a line. Half of the `path:line` citations in
+ * this paragraph were stale the last time anybody read them — `identity/src/server.ts:960` had
+ * become a log line, `market/src/bids.ts:432` a field assignment — and a citation that has drifted
+ * to a plausible neighbour is worse than none, because it reads as verified. A constant or a
+ * function name moves with the code it names.
+ *
  *   - `identity.password.changed` — identity never announces a password change; it revokes every
- *     session with `reason: 'password_changed'` (identity/src/server.ts:960).
+ *     session with `reason: 'password_changed'` (`identity/src/server.ts`, the `revokeAllSessions`
+ *     call on the password-change route).
  *   - `wallet.deposit.detected` — wallet emits nothing when a deposit is seen, only when it is
- *     credited (wallet/src/deposits.ts:657).
+ *     credited (`wallet/src/deposits.ts`, `DEPOSIT_CREDITED`).
  *   - `settlement.transaction.failed` — settlement emits `settlement.outbound.failed`
- *     (settlement/src/withdrawals.ts:482).
+ *     (`settlement/src/outbox.ts`, `SETTLEMENT_OUTBOUND_FAILED`).
  *   - `trade.bot.triggered` / `trade.bot.stopped` — trade emits `created`, `started` and `paused`
- *     (trade/src/bots.ts:203, :592, :614).
- *   - `market.offer.received` — market emits `market.offer.made` (market/src/bids.ts:432).
+ *     (`trade/src/bots.ts`, the three `topic: 'trade.bot.*'` emits).
+ *   - `market.offer.received` — market emits `market.offer.made` (`market/src/bids.ts`,
+ *     `OFFER_MADE_TOPIC`).
  *   - `devplatform.apikey.created` / `.revoked` — devplatform emits `devplatform.key.issued` and
- *     `devplatform.key.revoked` (devplatform/src/apikeys.ts:274, :359).
+ *     `devplatform.key.revoked` (`devplatform/src/apikeys.ts`, `emitKeyIssued` and
+ *     `emitKeyRevoked`).
  *
  * A rule for a topic nobody emits is not a feature waiting for its producer. It is a feature that
  * reports itself as delivered: the coverage test counted it, `AD-08 requires a rule for X` passed,

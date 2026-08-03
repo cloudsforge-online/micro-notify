@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { TOPIC_NAMES, isRegisteredTopic } from '@cloudsforge/contracts-events'
+import { TOPIC_NAMES, isRegisteredTopic, parseActor, type Actor } from '@cloudsforge/contracts-events'
 import { MAPPED_TOPICS, NON_NOTIFYING_TOPICS, RULES, hasRule, isKnownTopic } from './catalogue.ts'
 import {
   AWAITING_REGISTRATION,
@@ -195,7 +195,7 @@ test('each newly live rule addresses a real recipient from the payload its produ
       dedupeKey: 'trading.bot_paused:bot-1',
     },
     {
-      // devplatform/src/apikeys.ts:272 — the display and the project, never the key, and the actor
+      // devplatform's `emitKeyIssued` — the display and the project, never the key, and the actor
       // is the caller: `user:<id>` for a session, which under a stolen session IS the victim's id.
       topic: 'devplatform.key.issued',
       payload: { keyId: 'key-1', projectId: 'p-1', environment: 'live', display: 'cfk_live_abc', scopes: [] },
@@ -231,18 +231,72 @@ test('each newly live rule addresses a real recipient from the payload its produ
     assert.equal(set.recipients[0].dedupeKey, each.dedupeKey, 'keyed on the domain id, never on the event id')
   }
 
-  // And an envelope with no user anywhere is no_recipient rather than a guess — the `key:<display>`
-  // and `system:identity` actors devplatform also emits under (server.ts:965, :1527).
-  const anonymous = unregisteredEvent(
-    'devplatform.key.revoked',
-    'k-1',
-    { keyId: 'key-1', projectId: 'p-1' },
-    { actor: 'service:devplatform' },
-  )
-  assert.deepEqual(RULES['devplatform.key.revoked']?.recipients(anonymous), {
-    kind: 'none',
-    reason: 'no_recipient',
-  })
+  // And an envelope with no user anywhere is no_recipient rather than a guess. devplatform emits
+  // under two such actors today: `service:<display>` when a key mints a key, and `service:identity`
+  // when the organisation-erasure path revokes every key an organisation holds. Both are legal
+  // envelopes naming no person, and both must resolve nobody rather than somebody.
+  for (const actor of ['service:cfk_live_abcd1234', 'service:identity'] as const) {
+    const anonymous = unregisteredEvent(
+      'devplatform.key.revoked',
+      'k-1',
+      { keyId: 'key-1', projectId: 'p-1' },
+      { actor },
+    )
+    assert.deepEqual(
+      RULES['devplatform.key.revoked']?.recipients(anonymous),
+      { kind: 'none', reason: 'no_recipient' },
+      `${actor} resolved a recipient — telling the wrong person their credentials changed`,
+    )
+  }
+})
+
+/**
+ * THE PREDICTION THIS SERVICE MADE, KEPT AS A PROPERTY INSTEAD OF AS PROSE.
+ *
+ * `catalogue.ts` carried a note naming two actor spellings devplatform was emitting —
+ * `key:<display>` for an API-key caller and `system:identity` on the organisation-erasure path —
+ * and called them "a producer to fix". It was right, and it understated the fault: neither spelling
+ * is a legal `Actor`, so every envelope on both paths was one the estate refuses outright. They
+ * were invisible only because `activity` quarantined their (then unregistered) topic without
+ * validating the envelope.
+ *
+ * The note also cited `devplatform/src/server.ts:669` and `:1527`, and both citations were stale
+ * within the hour the defects were fixed. That is what a cross-repository `path:line` claim always
+ * does, and it is why the record is kept HERE instead: the fault was never at a line number, it was
+ * a contract violation, and the contract is a dependency this repository's CI actually resolves.
+ * `micro-devplatform` is not checked out by `service-ci.yml`, so a content pin into it could only
+ * ever skip — and a check that always skips is the same as no check with a better reputation.
+ */
+test('the two illegal actor spellings can never come back', () => {
+  for (const spelling of ['key:cfk_live_abcd1234', 'system:identity']) {
+    const parsed = parseActor(spelling)
+    assert.equal(parsed.ok, false, `${spelling} is a legal actor again — the contract widened`)
+  }
+  // `system` bare is legal and carries no subject, which is exactly why `system:identity` is not:
+  // parseActor matches the bare word first and then refuses `system` as an unknown KIND.
+  assert.equal(parseActor('system').ok, true)
+  // And the corrected spellings devplatform emits today are legal, or the repair traded one
+  // refused envelope for another.
+  for (const spelling of ['service:cfk_live_abcd1234', 'service:identity', `user:${ALICE}`]) {
+    assert.equal(parseActor(spelling).ok, true, `${spelling} is refused by the contract`)
+  }
+
+  // And notify's own behaviour for each, which is the half a contract cannot state. An illegal
+  // actor must read as "no recipient" and never throw: a rule that threw would turn a delivered
+  // event into a failed delivery and a redelivery loop.
+  for (const actor of ['key:cfk_live_abcd1234', 'system:identity', 'system', 'user:'] as const) {
+    const event = unregisteredEvent(
+      'devplatform.key.issued',
+      'k-1',
+      { keyId: 'key-1', projectId: 'p-1', display: 'cfk_live_abcd1234' },
+      { actor: actor as Actor },
+    )
+    assert.deepEqual(
+      RULES['devplatform.key.issued']?.recipients(event),
+      { kind: 'none', reason: 'no_recipient' },
+      `${actor} must resolve nobody rather than somebody`,
+    )
+  }
 })
 
 /**

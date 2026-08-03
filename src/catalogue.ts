@@ -680,17 +680,50 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
   /*
    * The two API-key rules address the ENVELOPE ACTOR, and that is the whole of why they work.
    *
-   * The payload names the key and the project, never a user (devplatform/src/apikeys.ts:272, :357),
-   * and notify holds no project-membership table it could look an owner up in. The actor is
-   * `user:<id>` for a caller holding a session (devplatform/src/server.ts:669) — and in the case
-   * these rules exist for, a stolen session, that id IS the victim's, because the attacker is acting
-   * as them. So the notification lands in the real owner's inbox, which is exactly the
-   * `identity.session.created` model.
+   * The payload names the key and the project, never a user — `emitKeyIssued` and `emitKeyRevoked`
+   * in `devplatform/src/apikeys.ts` send `{ keyId, projectId, environment, display, … }` and no
+   * owner — and notify holds no project-membership table it could look one up in. `actorOf` makes
+   * the actor `user:<id>` for a caller holding a session, and in the case these rules exist for — a
+   * stolen session — that id IS the victim's, because the attacker is acting as them. So the
+   * notification lands in the real owner's inbox: the `identity.session.created` model.
    *
-   * When the actor is `key:<display>` (a key minting a key) or `system:identity` (the erasure path
-   * at devplatform/src/server.ts:1527) `forUser` answers `no_recipient` rather than guessing. That
-   * is a producer to fix, and it is visible as one; the alternative is telling the wrong person that
-   * their credentials changed.
+   * ── THIS COMMENT PREDICTED TWO PRODUCER DEFECTS. BOTH WERE REAL, AND BOTH ARE NOW FIXED. ────
+   *
+   * It used to name two actor spellings devplatform emitted, `key:<display>` for an API-key caller
+   * and `system:identity` on the organisation-erasure path, and call them "a producer to fix". They
+   * were worse than this comment guessed: neither is a legal `Actor` at all. `ActorKind` is
+   * `user | service | operator | system`, `system` is the one kind that takes NO subject, so
+   * `parseActor` refuses both — every envelope on either path was one the estate rejects outright.
+   * devplatform has since corrected them to `service:<display>` and `service:identity`.
+   *
+   * Two lessons are worth more than the citations were, and both are asserted rather than asserted
+   * about — see `topics.test.ts`, `the two illegal actor spellings can never come back`:
+   *
+   *   1. **The prediction is now a property of the CONTRACT, not of another repository's line
+   *      numbers.** The version of this note that cited `server.ts:669` and `:1527` was stale within
+   *      the hour those defects were fixed, which is how a `path:line` claim always ends. What
+   *      cannot go stale is `parseActor` refusing `key:` and `system:<anything>`, and that is
+   *      checkable in this repository's CI, which checks out `micro-contracts` and not
+   *      `micro-devplatform`.
+   *   2. **The defects were invisible because a CONSUMER excused them.** `activity` quarantined
+   *      unregistered topics without validating their envelopes, so an illegal actor on an
+   *      unregistered topic was stored rather than refused. Registration removed that shelter.
+   *      A quarantine that forgives more than the one fact it is for hides producer bugs until a
+   *      release somewhere else exposes them all at once.
+   *
+   * ── WHAT IS STILL TRUE, AND THE GAP THAT DID NOT CLOSE ──────────────────────────────────────
+   *
+   * `forUser` still answers `no_recipient` for a `service:` actor, and that is CORRECT and must
+   * stay: a key minting a key is no person's news, and guessing would tell the wrong person that
+   * their credentials changed. What changed is why — it is now the right answer to a legal
+   * envelope, not the visible symptom of a broken one.
+   *
+   * The consequence is a live gap rather than a resolved one. The erasure path revokes EVERY live
+   * key an organisation holds, as `service:identity`, and nobody is told: no user is on that
+   * envelope, and neither this service nor `activity` may read a database to find one. `activity`
+   * files it as `api.key_revoked_by_platform`, internal — an operator's record and nobody's
+   * notification. The repair is one field from devplatform (`api_keys.created_by` is on the row
+   * `revokeOrgKeys` already updates), and it is filed for micro-devplatform, not worked around here.
    */
 
   'devplatform.key.issued': Object.freeze({
