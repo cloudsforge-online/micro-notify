@@ -227,6 +227,20 @@ export const TEMPLATES = Object.freeze({
 
   /* ------------------------------------------------------------------ products */
 
+  'market.offer_received': Object.freeze({
+    id: 'market.offer_received',
+    category: 'market',
+    params: ['amount', 'asset', 'listingId'],
+    path: '/market/offers',
+    // The amount is in the SUBJECT deliberately, for the reason `transfer.posted` records: a
+    // digest is an index of subjects, and three offers reading "You have a new offer" tell the
+    // reader nothing about which to open. An offer holds the buyer's money in escrow while it
+    // waits, so the sentence says the thing that makes it worth opening now.
+    text: en(
+      'A new offer of {{amount}} {{asset}} on your listing',
+      'Somebody offered {{amount}} {{asset}} for your listing {{listingId}}.\n\nThe offer is funded and held in escrow until you accept or decline it, or it expires.',
+    ),
+  }),
   'market.sale': Object.freeze({
     id: 'market.sale',
     category: 'market',

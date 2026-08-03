@@ -127,12 +127,32 @@ export interface ProposedTopic {
  * quarantine working, not a regression this commit introduced." It was right: this repository's
  * suite went red for exactly that, and these are the deletions it was asking for.
  *
- * So the honest state of the escape hatch today is **unused**. Every rule in `catalogue.ts` names a
- * topic the registry holds, which is the state the whole file is trying to reach. It stays because
- * the situation it exists for recurs — notify is the first consumer of every new topic — and
- * because an empty quarantine is checkable while an absent one is not.
+ * It emptied, and then it was used again within the hour — which is the best evidence that the
+ * situation it exists for is normal rather than exceptional. `market.offer.made` is the entry, and
+ * it is the mechanism at its most useful: a record in `UNPRODUCED_NOTIFICATIONS` said the rule
+ * could not be written, `micro-market` supplied the field that made it writable, and the topic is
+ * still unregistered. Without this table the choice would be between a rule nothing can see is
+ * ahead of the registry and a record that has stopped being true.
+ *
+ * The spec is copied VERBATIM from `market/src/topics.ts`'s own quarantine, so `micro-contracts`
+ * adopting it is a paste and the two repositories cannot propose two different contracts for one
+ * topic.
  */
-export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({})
+export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({
+  'market.offer.made': {
+    reason:
+      "A seller with an offer nobody told them about is a sale that does not happen, and the buyer's money sits in escrow while it waits. This service declined the rule for the life of the service — correctly, because the envelope named only the OFFERER and a rule keyed to it would have told them their own offer arrived. market/src/bids.ts:477 now sends `sellerSubject`, read off the listing row the emitting transaction already holds `for update`, so it is the seller at the moment the offer was made. The rule reads it explicitly rather than through `forUser`, because the envelope actor is the offerer.",
+    emittedAt: 'market/src/bids.ts:449',
+    spec: {
+      producer: 'market',
+      payloadType: 'OfferMade',
+      version: '1.0',
+      keyedBy: 'listing_id',
+      description:
+        'A buyer made an offer on a listing. Carries the seller as well as the offerer: the notification this event exists for goes to the person who did not act.',
+    },
+  },
+})
 
 /**
  * An AD-08 notification this service cannot produce, and the ONE reason why.
@@ -235,15 +255,26 @@ export const UNPRODUCED_NOTIFICATIONS: readonly UnproducedNotification[] = Objec
    * been met. That file fails its step when a recorded finding is repaired and not deleted, so it
    * needs the same deletion. It is not in this repository's gift.
    * ──────────────────────────────────────────────────────────────────────────────────────────── */
-  Object.freeze({
-    requirement: 'marketplace offer received',
-    guessedTopic: 'market.offer.received',
-    emits: 'market.offer.made',
-    blockedBy: 'no-subject',
-    owner: 'micro-market',
-    evidence:
-      "market/src/bids.ts:432 emits it with `payload: { listingId, offerId, offererSubject, amount, assetCode }`, keyed by the listing, actor the OFFERER. The recipient this requirement names is the SELLER, and the payload does not carry them — `listing.sellerSubject` is in scope three lines above the emit (bids.ts:399 reads it to refuse shill bidding) and is not put on the event. So the only subject notify could resolve is the person who made the offer, and telling them they made an offer is both noise and a false claim of coverage. One field on market's payload closes it.",
-  }),
+  /* ────────────────────────────────────────────────────────────────────────────────────────────
+   * DELETED: 'marketplace offer received', guessed at `market.offer.received`, recorded
+   * `blockedBy: 'no-subject'` against `market.offer.made`.
+   *
+   * The second record to close in an hour, and the second whose deletion `contradictedGaps()`
+   * forced rather than requested. Its evidence said the seller "is not carried" and that
+   * "`listing.sellerSubject` is in scope three lines above the emit and is not put on the event".
+   * `micro-market` put it on the event — `market/src/bids.ts:477`, commit "three topics named the
+   * person who acted, not the person it happened to" — and its own quarantine entry names this
+   * record as the thing that closes when notify writes the rule. It is written.
+   *
+   * The topic is not registered, so the rule is quarantined in `AWAITING_REGISTRATION` above with
+   * the spec market is asking for, copied verbatim. That is the honest state and it is visible,
+   * which is the whole difference between this and the fifteen rules that shipped naming topics no
+   * producer emits.
+   *
+   * micro-org's `tools/estate-topic-gaps.json` holds `stale-record:market.offer.made`,
+   * `status: 'deferred'`, with an `until` reading "market's OFFER_MADE payload carries the seller
+   * subject". It does. That entry needs deleting too, and it is not in this repository's gift.
+   * ──────────────────────────────────────────────────────────────────────────────────────────── */
   Object.freeze({
     requirement: 'auction ended',
     guessedTopic: 'market.auction.ended',

@@ -99,7 +99,24 @@ test('the rules for topics nobody emits stay deleted', () => {
 })
 
 test('every unproduced notification names the producer that decided it', () => {
-  assert.ok(UNPRODUCED_NOTIFICATIONS.length >= 5, 'the records are being read, not an empty array')
+  // The EXACT set, not a `length >= n` floor.
+  //
+  // The floor was `>= 5` and it had to be edited the moment a record closed, which is a number that
+  // gets ratcheted downwards by whoever is closing a record — the one person who will not think
+  // twice about it. This is stronger in both directions: a record added without a decision fails
+  // here, and a record deleted without the rule that justifies the deletion fails here too. The
+  // original intent, "the records are being read rather than an empty array", is kept by the same
+  // assertion rather than by a separate one that can pass vacuously.
+  assert.deepEqual(
+    UNPRODUCED_NOTIFICATIONS.map((gap) => gap.requirement).sort(),
+    [
+      'auction ended',
+      'deposit detected, before confirmation',
+      'risk limit reached',
+      'service incident',
+    ],
+    'a recorded gap was added or removed — say which, and why, here',
+  )
   for (const gap of UNPRODUCED_NOTIFICATIONS) {
     assert.ok(gap.requirement.length > 5, `${gap.guessedTopic}: name the AD-08 requirement`)
     assert.equal(hasRule(gap.guessedTopic), false, `${gap.guessedTopic} is recorded AND mapped`)
@@ -229,37 +246,50 @@ test('each newly live rule addresses a real recipient from the payload its produ
 })
 
 /**
- * The one that is still a record, and why it is not the one beside it.
+ * **Both `no-subject` records closed, within an hour of each other, and neither by this service.**
  *
- * Both topics were emitted by a live producer, which is what micro-org's check saw, and neither
- * envelope named anybody this service could notify. `settlement.outbound.failed` has since had its
- * `userId` added by its producer and is a rule; `market.offer.made` has not, and this pins that it
- * stays recorded rather than quietly acquiring a rule that would address the wrong person — the
- * OFFERER, who is on the envelope, rather than the SELLER, who is not.
+ * The pair were the two that survived the purge of the five: real events from live producers whose
+ * envelopes named nobody notify could address. Each needed ONE FIELD from a producer, each got it,
+ * and each record then contradicted a rule in this repository's own catalogue — which is what
+ * `contradictedGaps()` fails on, so the repair could not leave the record behind.
  *
- * The difference is checked from the source, not asserted from memory: the record's `evidence`
- * names `market/src/bids.ts:432`, and the estate check in micro-org reads `emits` as a literal.
+ *   - `settlement.outbound.failed` — `userId`, settlement/src/withdrawals.ts:537.
+ *   - `market.offer.made` — `sellerSubject`, market/src/bids.ts:477.
+ *
+ * That is the lesson worth keeping: `blockedBy: 'no-subject'` is the most PERISHABLE state a record
+ * can be in, because the repair is a field rather than a design. Both were written as though they
+ * would stand for weeks and both were false in hours.
  */
-test('a topic whose envelope names nobody stays a record, not a rule', () => {
-  assert.equal(
-    hasRule('market.offer.made'),
-    false,
-    'market.offer.made has a rule and its envelope names no recipient but the offerer',
+test('every no-subject record that a producer has since fixed is gone', () => {
+  assert.deepEqual(
+    UNPRODUCED_NOTIFICATIONS.filter((each) => each.blockedBy === 'no-subject').map(
+      (each) => each.emits,
+    ),
+    [],
+    'a no-subject record survives — check whether its producer has since named the subject',
   )
-  const gap = UNPRODUCED_NOTIFICATIONS.find((each) => each.emits === 'market.offer.made')
-  assert.ok(gap, 'market.offer.made is neither ruled nor recorded')
-  assert.equal(gap?.blockedBy, 'no-subject')
-  assert.equal(gap?.owner, 'micro-market')
-  // Not registered, so it is not accepted at /ingest either.
-  assert.equal(isKnownTopic('market.offer.made'), false)
+  for (const topic of ['settlement.outbound.failed', 'market.offer.made']) {
+    assert.equal(hasRule(topic), true, `${topic} named a subject; the rule it was owed is missing`)
+    assert.equal(isKnownTopic(topic), true, `${topic} must be accepted at /ingest`)
+    assert.equal(
+      Object.hasOwn(NON_NOTIFYING_TOPICS, topic),
+      false,
+      `${topic} is both mapped and recorded as not notifying`,
+    )
+  }
+  // market's is ahead of the registry, so it is quarantined with the spec that registers it — the
+  // legitimate state AWAITING_REGISTRATION exists to make visible, rather than an invisible one.
+  assert.equal(isRegisteredTopic('market.offer.made'), false)
+  assert.ok(Object.hasOwn(AWAITING_REGISTRATION, 'market.offer.made'))
+  assert.equal(isRegisteredTopic('settlement.outbound.failed'), true)
 })
 
 /**
  * The record that closed, checked from both ends.
  *
- * `settlement.outbound.failed` was the other `no-subject` record and it is now a rule, because
- * settlement put `userId` on the payload (`settlement/src/withdrawals.ts:537`). Three things had to
- * move together, and a test that checked only one would let the other two rot:
+ * `settlement.outbound.failed` was a `no-subject` record and it is now a rule, because settlement
+ * put `userId` on the payload (`settlement/src/withdrawals.ts:537`). Three things had to move
+ * together, and a test that checked only one would let the other two rot:
  *
  *   1. the rule exists — otherwise the notification is still missing;
  *   2. the `UNPRODUCED_NOTIFICATIONS` record is gone — `contradictedGaps()` fails while both stand,

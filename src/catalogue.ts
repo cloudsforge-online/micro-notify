@@ -728,6 +728,84 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
+  /**
+   * Somebody offered on your listing — **and the recipient is the person who did not act.**
+   *
+   * ## The refusal that was right, and the one field that ended it
+   *
+   * This rule was refused for the life of the service and the refusal is recorded in `topics.ts`:
+   * `market/src/bids.ts` emitted `{ listingId, offerId, offererSubject, amount, assetCode }` with
+   * the OFFERER as the envelope actor, so every route this service has to a person — payload
+   * `user_id`, the key, the `user:` actor — resolved the offerer. A rule then would have told the
+   * offerer that their own offer arrived: noise, a false claim of AD-08 coverage, and a
+   * notification about someone else's money sent to the wrong person.
+   *
+   * `market/src/bids.ts:477` now sends `sellerSubject`, read off the listing row the same
+   * transaction already holds `for update`, so it is the seller **at the moment the offer was
+   * made** rather than whoever owns the listing when a consumer gets round to reading it. Market's
+   * own commit names this rule as the thing that closes its record.
+   *
+   * ## `forUser` is deliberately not used here
+   *
+   * `userIdOf` falls back to `actor` when it is `user:<id>`, and on this envelope that actor IS the
+   * offerer. So the generic helper would resolve the wrong person on every event — the same trap as
+   * `aetherholm.battle.resolved`, where the actor is the raider and the notification is the
+   * defender's. The seller is read explicitly or there is no recipient.
+   *
+   * ## A subject is not a user id
+   *
+   * `sellerSubject` is `user:<uuid>` **or** `service:<name>`: a listing may be owned by a service
+   * principal (`market/src/server.ts:713` takes the seller from `subjectOf(principal)`). Stripping
+   * the prefix blindly would address a notification to a service name — a row keyed on a user id
+   * that is not one. A non-`user:` seller is `not_applicable`: the rule looked at it and decided a
+   * service principal is not a person to interrupt, which is a different fact from "the producer
+   * did not say who", and the two must not collapse into one metric.
+   */
+  'market.offer.made': Object.freeze({
+    category: 'market',
+    priority: 'normal',
+    templateId: 'market.offer_received',
+    why: 'A seller with an offer nobody told them about is a sale that does not happen. The offer holds the buyer\'s money in escrow while it waits, so silence costs both sides.',
+    recipients: (event: InboundEvent): RecipientSet => {
+      const seller = str(event.payload, ['seller_subject', 'sellerSubject'], '')
+      if (!seller) return { kind: 'none', reason: 'no_recipient' }
+      // Never `slice` without checking the prefix: `service:mint` would become a "user id" of
+      // `mint`, and the row would be filed against a user that does not exist.
+      if (!seller.startsWith('user:')) {
+        // A RECOGNISED non-user principal is `not_applicable` — the producer said exactly who the
+        // seller is and the answer is that they are not a person. Anything else is a producer that
+        // has stopped spelling a subject (a bare uuid, most likely) and is `no_recipient`, because
+        // the two must not collapse: `not_applicable` on a malformed subject would silently swallow
+        // every offer notification while reporting the rule as working, which is precisely the
+        // "reports itself as delivered" failure this catalogue exists to make impossible.
+        const known =
+          seller.startsWith('service:') || seller.startsWith('operator:') || seller === 'system'
+        return { kind: 'none', reason: known ? 'not_applicable' : 'no_recipient' }
+      }
+      const userId = seller.slice('user:'.length)
+      if (!userId) return { kind: 'none', reason: 'no_recipient' }
+      const offerId = str(event.payload, ['offer_id', 'offerId'], event.id)
+      return {
+        kind: 'recipients',
+        recipients: [
+          {
+            userId,
+            params: {
+              amount: str(event.payload, ['amount'], 'An offer'),
+              asset: str(event.payload, ['asset_code', 'assetCode', 'asset'], ''),
+              // The listing, because a seller with several needs to know which one.
+              listingId: str(event.payload, ['listing_id', 'listingId'], event.key),
+            },
+            // Keyed on the OFFER, not the listing: a second offer on the same listing is a second
+            // piece of news, and keying on the listing would silence every offer after the first.
+            dedupeKey: `market.offer_received:${offerId}`,
+            subjectUrn: `cf:market:listing:${str(event.payload, ['listing_id', 'listingId'], event.key)}`,
+          },
+        ],
+      }
+    },
+  }),
+
   'market.listing.sold': Object.freeze({
     category: 'market',
     priority: 'high',

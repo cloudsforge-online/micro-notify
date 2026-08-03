@@ -76,8 +76,12 @@ test('every notification AD-08 names is either live or a recorded gap', () => {
     // service because the envelope named nobody; settlement added `userId` (withdrawals.ts:537)
     // and the record in topics.ts had to go, because contradictedGaps() refuses to hold both.
     'settlement.outbound.failed',
-    // marketplace sale
+    // marketplace sale, and the offer that precedes one
     'market.listing.sold',
+    // "marketplace offer received". Refused for the life of the service because the envelope named
+    // only the OFFERER; market/src/bids.ts:477 now sends `sellerSubject`, so the rule goes to the
+    // person who did NOT act. Still unregistered, so it is quarantined in AWAITING_REGISTRATION.
+    'market.offer.made',
     // token deployment
     'mint.deploy.confirmed',
     // game reward
@@ -107,23 +111,22 @@ test('every notification AD-08 names is either live or a recorded gap', () => {
   for (const requirement of [
     'risk limit reached',
     'deposit detected, before confirmation',
-    // Names a topic a live producer emits — which is why it LOOKS like the ones that became rules,
-    // and is not. market/src/bids.ts:432 puts the OFFERER on the envelope and the notification is
-    // for the SELLER, so `blockedBy: 'no-subject'` and one field on market's payload closes it.
-    'marketplace offer received',
     'auction ended',
     'service incident',
   ]) {
     assert.ok(recorded.has(requirement), `AD-08 names "${requirement}" and nothing here accounts for it`)
   }
-  // And the one that closed. It was in the list above until settlement put `userId` on the failure
-  // payload; keeping it there while a rule exists is the exact contradiction contradictedGaps()
-  // fails on. Asserted from BOTH sides so neither half can be forgotten.
-  assert.equal(
-    recorded.has('withdrawal transaction failed outright'),
-    false,
-    'this is a rule now — a record saying it cannot be produced contradicts the catalogue',
-  )
+  // And the two that closed within an hour of each other, each because a producer added ONE FIELD.
+  // Both were in the list above; keeping either there while a rule exists is the exact
+  // contradiction contradictedGaps() fails on. Asserted from BOTH sides so neither half is
+  // forgotten — the requirement must be live in `live`, and absent from the records.
+  for (const closed of ['withdrawal transaction failed outright', 'marketplace offer received']) {
+    assert.equal(
+      recorded.has(closed),
+      false,
+      `"${closed}" is a rule now — a record saying it cannot be produced contradicts the catalogue`,
+    )
+  }
   assert.ok(MAPPED_TOPICS.length >= live.length)
 })
 
@@ -682,4 +685,119 @@ test('a late withdrawal and a failed one are two notifications, not one deduped 
   assert.equal(set?.kind, 'recipients')
   if (set?.kind !== 'recipients') return
   assert.equal(set.recipients[0].dedupeKey, keys[1])
+})
+
+/* ==================================================================================================
+ * market.offer.made — the rule whose whole difficulty is WHICH person.
+ *
+ * Every other field on this envelope names the offerer: the actor is `user:<offerer>`,
+ * `offererSubject` is them, and the key is the listing. The notification goes to the SELLER. So the
+ * failure mode is not silence, it is a well-formed notification delivered to the wrong person about
+ * somebody else's money — the same trap as `aetherholm.battle.resolved`, where the actor is the
+ * raider and the news is the defender's.
+ * ================================================================================================== */
+
+const LISTING = '55555555-5555-4555-8555-555555555555'
+
+/** The payload `market/src/bids.ts:449` builds, with the seller supplied. */
+function offerMade(sellerSubject: unknown): Record<string, unknown> {
+  return {
+    listingId: LISTING,
+    offerId: 'offer-1',
+    offererSubject: `user:${BOB}`,
+    ...(sellerSubject === undefined ? {} : { sellerSubject }),
+    amount: '250',
+    assetCode: 'USDC',
+  }
+}
+
+/** The offerer is the ACTOR, which is the whole trap. */
+function offerEvent(sellerSubject: unknown) {
+  return unregisteredEvent('market.offer.made', LISTING, offerMade(sellerSubject), {
+    actor: `user:${BOB}`,
+    producer: 'market',
+  })
+}
+
+test('an offer notifies the SELLER, never the offerer whose name is on every other field', () => {
+  const set = RULES['market.offer.made']?.recipients(offerEvent(`user:${ALICE}`))
+  assert.equal(set?.kind, 'recipients')
+  if (set?.kind !== 'recipients') return
+  assert.equal(set.recipients.length, 1)
+  assert.equal(set.recipients[0].userId, ALICE)
+  // The three ways this rule could have addressed the wrong person, each refused by name.
+  assert.notEqual(set.recipients[0].userId, BOB, 'the offerer, from offererSubject or the actor')
+  assert.notEqual(set.recipients[0].userId, `user:${ALICE}`, 'a subject is not a user id')
+  assert.notEqual(set.recipients[0].userId, LISTING, 'the envelope key is the listing')
+  assert.equal(set.recipients[0].params['amount'], '250')
+  assert.equal(set.recipients[0].params['asset'], 'USDC')
+  assert.equal(set.recipients[0].subjectUrn, `cf:market:listing:${LISTING}`)
+})
+
+/**
+ * **Yesterday's payload.** `{ listingId, offerId, offererSubject, amount, assetCode }` — exactly
+ * what market emitted before `sellerSubject` was added, and exactly the state that made this rule
+ * refusable for the life of the service.
+ *
+ * If the rule ever falls back to `forUser`, or to the actor, or to the key, this is the test that
+ * goes red — and every other assertion in this block would still pass, because today's payload
+ * carries a seller and the fallbacks are never reached. It is `no_recipient` and not
+ * `not_applicable`: the producer regressed, and an operator needs to see a producer to page.
+ */
+test("yesterday's offer payload, with no seller, is no_recipient rather than the offerer", () => {
+  assert.deepEqual(RULES['market.offer.made']?.recipients(offerEvent(undefined)), {
+    kind: 'none',
+    reason: 'no_recipient',
+  })
+})
+
+/**
+ * A listing owned by a service principal.
+ *
+ * `market/src/server.ts:713` takes the seller from `subjectOf(principal)`, which spells a service
+ * `service:<name>`. Stripping `user:` blindly would produce a "user id" of `mint` — a notification
+ * row filed against a user that does not exist, on a table nobody can read. `not_applicable` and
+ * not `no_recipient`, because the producer said exactly who the seller is and the answer is that
+ * they are not a person: collapsing the two would put a producer on a page for behaving correctly.
+ */
+test('a listing owned by a service is not_applicable, never a user id spelled from a service name', () => {
+  for (const subject of ['service:mint', 'operator:root', 'system']) {
+    assert.deepEqual(
+      RULES['market.offer.made']?.recipients(offerEvent(subject)),
+      { kind: 'none', reason: 'not_applicable' },
+      `${subject} is a principal that is not a person`,
+    )
+  }
+  // A bare uuid, or an empty `user:`, is a producer that has stopped spelling a SUBJECT — which is
+  // a regression, not a service-owned listing. It must be `no_recipient`, because
+  // `not_applicable` here would silently swallow every offer notification while the rule reported
+  // itself as working. This is the distinction the first draft of this rule got wrong, and this
+  // test is what found it.
+  for (const subject of [ALICE, 'user:', 'mint', '']) {
+    assert.deepEqual(
+      RULES['market.offer.made']?.recipients(offerEvent(subject)),
+      { kind: 'none', reason: 'no_recipient' },
+      `${subject || '<empty>'} is not a subject; the producer is the thing to fix`,
+    )
+  }
+})
+
+test('two offers on one listing are two notifications, not one deduped into silence', () => {
+  const first = RULES['market.offer.made']?.recipients(offerEvent(`user:${ALICE}`))
+  const second = RULES['market.offer.made']?.recipients(
+    unregisteredEvent(
+      'market.offer.made',
+      LISTING,
+      { ...offerMade(`user:${ALICE}`), offerId: 'offer-2' },
+      { actor: `user:${BOB}`, producer: 'market' },
+    ),
+  )
+  assert.equal(first?.kind, 'recipients')
+  assert.equal(second?.kind, 'recipients')
+  if (first?.kind !== 'recipients' || second?.kind !== 'recipients') return
+  // Keyed on the OFFER. Keying on the listing would collapse every offer after the first into the
+  // one notification, which for a seller is the difference between an auction and a single bid.
+  assert.equal(first.recipients[0].dedupeKey, 'market.offer_received:offer-1')
+  assert.equal(second.recipients[0].dedupeKey, 'market.offer_received:offer-2')
+  assert.notEqual(first.recipients[0].dedupeKey, second.recipients[0].dedupeKey)
 })
