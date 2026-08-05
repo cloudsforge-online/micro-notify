@@ -378,8 +378,18 @@ function emailOf(payload: Record<string, unknown>): string | null {
  * verification mail whose link is missing is still a mail somebody can act on, whereas a blank link
  * resolves to the site root and tells them nothing.
  */
-function verifyLinkOf(payload: Record<string, unknown>, fallbackPath: string): string {
-  const value = payload['verify_url'] ?? payload['verifyUrl'] ?? payload['url']
+function safeLinkOf(
+  payload: Record<string, unknown>,
+  names: readonly string[],
+  fallbackPath: string,
+): string {
+  let value: unknown
+  for (const name of names) {
+    if (payload[name] !== undefined) {
+      value = payload[name]
+      break
+    }
+  }
   if (typeof value !== 'string' || value.length === 0) return fallbackPath
   let parsed: URL
   try {
@@ -388,6 +398,20 @@ function verifyLinkOf(payload: Record<string, unknown>, fallbackPath: string): s
     return fallbackPath
   }
   return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : fallbackPath
+}
+
+function verifyLinkOf(payload: Record<string, unknown>, fallbackPath: string): string {
+  return safeLinkOf(payload, ['verify_url', 'verifyUrl', 'url'], fallbackPath)
+}
+
+/**
+ * The reset link, or the fallback — which the reset rule treats as "do not send this at all".
+ *
+ * Split from `verifyLinkOf` by the key names only; the scheme guard is the same one and lives in
+ * `safeLinkOf` so there is one place a `javascript:` URL is refused rather than two that can drift.
+ */
+function resetLinkOf(payload: Record<string, unknown>, fallbackPath: string): string {
+  return safeLinkOf(payload, ['reset_url', 'resetUrl', 'url'], fallbackPath)
 }
 
 /** `2026-07-30 04:12 UTC`. Deterministic on purpose: `Intl` output varies by ICU build. */
@@ -679,6 +703,116 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
         verifyUrl: verifyLinkOf(event.payload, '/settings/account'),
       }),
       (event) => `cf:identity:user:${str(event.payload, ['user_id', 'userId'], event.key)}`,
+    ),
+  }),
+
+  /**
+   * The reset mail — the sibling of the rule above, and the reason `deliverPasswordReset` stopped
+   * being a seam that sent nothing.
+   *
+   * `identity/src/passwordReset.ts` hard-returned `{ delivered: false, channel: 'none' }` for the
+   * life of the service: `POST /auth/password/forgot` answered 202, recorded the token, logged
+   * `password_reset_undelivered`, and mailed nobody. Its own header said that was the supported
+   * mode "until `notify` exists". It exists, so this is the rule that mode was waiting for.
+   *
+   * ## Three deliberate differences from the verification rule
+   *
+   *   1. **`security`, not `account`.** A password reset is the one message a person receives when
+   *      somebody — possibly not them — is taking their account. It files where they look for that.
+   *   2. **No link, no notification.** `verifyLinkOf` degrades to a page that can issue a new
+   *      link, which is honest for a reader who is SIGNED IN. A reset reader is signed out by
+   *      definition and this platform has no page for them yet, so the same degradation would send
+   *      a mail that says "someone is resetting your password" and offers nothing to do about it —
+   *      the shape of a phishing message, sent by us. `applies` refuses instead, which counts as
+   *      `not_applicable` and shows up as a producer defect rather than as a mail nobody can use.
+   *   3. **The dedupe key is the event id**, for the reason the verification rule gives above and
+   *      more strongly: each request mints a NEW link and supersedes the last, so collapsing two
+   *      would leave somebody who clicked twice holding the only link that no longer works.
+   *
+   * `high` and never `critical`: §10.3's critical list is closed and pinned to eight topics. A
+   * reset can be asked for again, which is exactly what `critical` is not for.
+   *
+   * `learns` matters MORE here than on the verification event. Every account created before
+   * `identity.email.verification_requested` shipped has no `channel_targets` row at all, and a
+   * password reset is precisely the message such an account needs; without this the mail would be
+   * rendered and addressed to nobody.
+   */
+  'identity.password.reset_requested': Object.freeze({
+    category: 'security',
+    priority: 'high',
+    templateId: 'security.password_reset',
+    why: 'The only message that lets somebody who has lost their password get back in. Without it the request is recorded and nothing is sent, which is what identity did until this rule existed — a 202 and a warn line, and a user waiting for mail that was never going to arrive.',
+    learns: {
+      channel: 'email' as const,
+      read: (event: InboundEvent) => emailOf(event.payload),
+      // The payload, never the envelope actor: an operator-issued reset carries
+      // `operator:<id>` there, and learning that as the account's address would point every future
+      // notification for the user at a member of staff.
+      subject: (event: InboundEvent) => str(event.payload, ['user_id', 'userId'], '') || null,
+      why: 'identity owns the address and holds exactly one per user. This event carries it for the same reason the verification event does, and for one more: an account that predates verification has no target row here at all, so a reset would otherwise render a mail with nowhere to send it.',
+    },
+    recipients: forUser(
+      (event) => `security.password_reset:${event.id}`,
+      (event) => ({
+        handle: str(event.payload, ['handle'], 'there'),
+        resetUrl: resetLinkOf(event.payload, ''),
+      }),
+      (event) => `cf:identity:user:${str(event.payload, ['user_id', 'userId'], event.key)}`,
+      // See difference 2 above. The empty fallback is the sentinel and it is checked here rather
+      // than rendered: a template whose whole body is a link must not go out without one.
+      (event) => resetLinkOf(event.payload, '') !== '',
+    ),
+  }),
+
+  /**
+   * An external address became somewhere money can leave to — and the reverse.
+   *
+   * Both topics were registered by `micro-contracts` and mapped by nothing, which is the state the
+   * coverage ratchet exists to make loud: the suite went red rather than the notification going
+   * quietly missing. See micro-org #211 for what that cost in the meantime (no notify image
+   * published at all while it stood).
+   *
+   * They are `security` and not `wallet` because a link is authorised by a SIGNATURE and not by a
+   * password: an attacker holding the account adds their own address, and from then on the theft is
+   * indistinguishable from an ordinary withdrawal. The revocation is the same event seen from the
+   * other side and is worth the same interruption.
+   *
+   * `high`, not `critical`: §10.3's critical list is closed and pinned to eight topics.
+   *
+   * Keyed on the wallet, which is the registry's own `keyedBy` for both, so the pair cannot
+   * collapse into one another and a re-link after a revoke is its own message.
+   */
+  'wallet.link.verified': Object.freeze({
+    category: 'security',
+    priority: 'high',
+    templateId: 'security.wallet_link_verified',
+    why: 'The moment an address this platform does not control becomes a legal destination for the user money. If somebody else did it, this is the last message before the balance leaves.',
+    recipients: forUser(
+      (event) => `wallet.link.verified:${str(event.payload, ['wallet_id', 'walletId'], event.key)}`,
+      (event) => ({
+        chain: str(event.payload, ['chain'], 'external'),
+        // In full and never truncated — see the template. A lookalike address is caught by
+        // reading it, and by nothing else.
+        address: str(event.payload, ['address'], 'an address shown in your wallet'),
+        at: formatInstant(event.occurredAt),
+      }),
+      (event) => `cf:wallet:wallet:${str(event.payload, ['wallet_id', 'walletId'], event.key)}`,
+    ),
+  }),
+
+  'wallet.link.revoked': Object.freeze({
+    category: 'security',
+    priority: 'high',
+    templateId: 'security.wallet_link_revoked',
+    why: 'A withdrawal destination being removed is an account takeover seen from the other side, and it is the half a user never hears about anywhere else.',
+    recipients: forUser(
+      (event) => `wallet.link.revoked:${str(event.payload, ['wallet_id', 'walletId'], event.key)}`,
+      (event) => ({
+        authorisation: str(event.payload, ['authorisation'], 'withdrawals'),
+        walletId: str(event.payload, ['wallet_id', 'walletId'], event.key),
+        at: formatInstant(event.occurredAt),
+      }),
+      (event) => `cf:wallet:wallet:${str(event.payload, ['wallet_id', 'walletId'], event.key)}`,
     ),
   }),
 
@@ -1550,6 +1684,16 @@ export const MAPPED_TOPICS: readonly string[] = Object.freeze(Object.keys(RULES)
 export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.freeze({
   'identity.user.deleted':
     'Erasure, not news. Handled by the pipeline as a deletion of everything this service holds for the user — see ERASURE_TOPICS. Sending a notification to an account being erased would be both useless and a data-retention problem.',
+  // ── the three wallet topics that are answered NO, and why each is a decision ───────────────
+  // Registered by micro-contracts, mapped by nothing, and the reason the suite was red on main
+  // (micro-org #211). The other two — wallet.link.verified and wallet.link.revoked — have RULES
+  // above, because nothing else in the estate tells a user their money gained a destination.
+  'wallet.deposit_address.assigned':
+    'The user is looking at it. An assignment happens because they asked for a deposit address, and the address is in the response they are reading; a rotation replaces one they are not using. The envelope is also keyed `chain:network:address` and actored `service:wallet` (wallet/src/deposits.ts:353, :365), so this is the platform talking to itself about where funds land. A mail restating an address the reader already has on screen is how a user learns to ignore mail from us.',
+  'wallet.withdrawal.refunded':
+    'Already sent, by the service that knows WHY. settlement.outbound.failed carries `refundable` and its rule renders withdrawal.failed_refunded — "the amount is coming back" — from the same withdrawal id. wallet emits this when the reservation actually returns to the balance, which is the same withdrawal reaching the same user seconds later. A rule here is a second mail about one refund, and the dedupe key cannot save it because the two rules would have to agree on a key across two producers by accident. If the landing moment is judged worth its own message it belongs as a VARIANT of the settlement rule, not as a rule here.',
+  'wallet.withdrawal.stuck':
+    'Already sent, by settlement.withdrawal.stuck, whose rule is above and renders withdrawal.failed off the same withdrawal id. Two services detect one stuck withdrawal from either end — wallet because settlement has said nothing before the deadline (wallet/src/withdrawals.ts:684), settlement because its own outbound has not confirmed — and one stuck withdrawal is one fact to the person waiting for the money. Note the settlement rule renders "Nothing has left your balance", which is wrong for a withdrawal whose funds are still RESERVED; that is a defect in the existing rule to fix there rather than a reason to add a second mail here.',
   // ── aetherholm, the first game in the registry ─────────────────────────────────────────────
   // Phase 2 changed the answer for two topics: battle.resolved and spire.captured now have
   // RULES above — the first game events worth an interruption. The phase-1 five below keep

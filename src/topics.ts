@@ -219,8 +219,45 @@ export interface ProposedTopic {
  * Registration returned "check your email" and no email could ever arrive. This table existing is
  * what made that diagnosable in one grep; what it could not do is stop a producer being deployed
  * ahead of the contract, because deployment order is not a property of a checkout.
+ *
+ * It emptied, and it is in use again, which is the third time and the ordinary case rather than the
+ * exceptional one. `identity.password.reset_requested` is the entry, and this time the order is
+ * being kept deliberately: the lesson above is that a PRODUCER deployed ahead of its contract is
+ * the thing that reaches users, so this consumer's rule and the producer's emit go out together and
+ * the registry entry is the one piece owned by another repository.
  */
-export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({})
+export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({
+  /**
+   * The password reset mail, and the sibling of `identity.email.verification_requested` in every
+   * respect that matters — same producer, same key, same `secretParams` treatment at the far end.
+   *
+   * The spec below is copied VERBATIM from `identity/src/topics.ts`'s own quarantine entry, so
+   * `micro-contracts` adopting it is a paste from either side and the two repositories cannot
+   * propose two different contracts for one topic.
+   *
+   * **Read this before deciding the payload should not carry `reset_url`.** #184 is open against
+   * the verification topic for carrying a live credential on the bus, and its remedy — emit a
+   * reference and redeem the link at send time — is right there and impossible here: identity
+   * stores the reset token only as its SHA-256, so it cannot serve the link back later, and
+   * reference-and-redeem would mean retaining the raw token in the credential table for ever
+   * instead of the URL sitting in a row for thirty minutes. The TTL is what bounds this one, and at
+   * thirty minutes it is 1/48th of the verification token's — which is #184's own second remedy,
+   * applied here from the day the producer was written.
+   */
+  'identity.password.reset_requested': Object.freeze({
+    reason:
+      "The only event that asks anybody to send a password reset. Until it existed `deliverPasswordReset` hard-returned `{ delivered: false, channel: 'none' }`, so `POST /auth/password/forgot` answered 202, recorded the token and sent nothing at all — a user who forgot their password depended on an operator noticing a warn line and issuing the link by hand. It is keyed and shaped as the sibling of identity.email.verification_requested so notify's rule for it is the same rule: it carries the address, so it is also the event from which a consumer can learn where to reach an account that predates verification.",
+    emittedAt: 'identity/src/passwordReset.ts:288',
+    spec: Object.freeze({
+      producer: 'identity',
+      payloadType: 'PasswordResetRequested',
+      version: '1.0',
+      keyedBy: 'user_id',
+      description:
+        'A single-use password reset link has been minted for an account. Carries the address and the link, which expires in thirty minutes and works once.',
+    }),
+  }),
+})
 
 /**
  * An AD-08 notification this service cannot produce, and the ONE reason why.

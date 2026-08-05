@@ -107,6 +107,34 @@ export const TEMPLATES = Object.freeze({
       'A session was signed out at {{at}} because {{reason}}.\n\nIf that was not you, someone else may hold your password: reset it and sign out everywhere now.',
     ),
   }),
+  /**
+   * The second mail that carries a credential, and the first one a signed-out person ever needs.
+   *
+   * Shaped on `account.verify_email` deliberately rather than on the security templates around it:
+   * `path` is the parameter, `resetUrl` is a `secretParams` so it is redacted out of every HTTP
+   * response, and `deliverOn` is email alone so the ordinary fan-out cannot sign it and POST it to
+   * a developer's webhook endpoint. `POST /admin/broadcasts` refuses it by the same property, so
+   * the most convincing phishing message this estate could send still cannot be sent by an
+   * operator.
+   *
+   * Two things are said here that the verification mail does not have to say. **"You can ignore
+   * this"** is the whole of what an unsolicited reset means, and it has to come before anything
+   * else: the request is unauthenticated, so anybody who knows an address can cause this mail, and
+   * a reader who did not ask needs to know in the first line that their password has not changed.
+   * **Thirty minutes** is named because it is short enough to be the reason the link failed.
+   */
+  'security.password_reset': Object.freeze({
+    id: 'security.password_reset',
+    category: 'security',
+    params: ['handle', 'resetUrl'],
+    secretParams: ['resetUrl'],
+    deliverOn: ['email'] as const,
+    path: '{{resetUrl}}',
+    text: en(
+      'Reset your CloudsForge password',
+      'Hello @{{handle}} — a password reset was requested for your CloudsForge account.\n\nThe link in this email works once and expires thirty minutes after it was sent. Your password has not changed yet, and nothing happens until you use it.\n\nIf this was not you, ignore this email: the link expires on its own and your account is untouched. Nobody at CloudsForge will ever ask you to forward it to them.',
+    ),
+  }),
   'security.mfa_changed': Object.freeze({
     id: 'security.mfa_changed',
     category: 'security',
@@ -115,6 +143,40 @@ export const TEMPLATES = Object.freeze({
     text: en(
       'Your two-factor authentication was changed',
       'Two-factor authentication on your account was {{change}} at {{at}}.\n\nActive factors remaining: {{remainingFactors}}.\n\nIf this was not you, restore a second factor now — an account with none is protected by its password alone.',
+    ),
+  }),
+  /* ------------------------------------------------------------------
+   * The two halves of an external withdrawal destination.
+   *
+   * `wallet.link.verified` is the moment an address the platform does not control becomes somewhere
+   * money can be sent, and it is authorised by a signature rather than by a password — so an
+   * attacker who has taken an account adds their own address here and the theft looks like an
+   * ordinary withdrawal from then on. That is why these file under `security` rather than `wallet`,
+   * and why the revocation is worth a message too: a destination silently REMOVED is the same
+   * account takeover seen from the other side.
+   *
+   * The address is printed in full. It is public by construction, it is the one field a reader can
+   * check against the wallet they think they linked, and a truncated one is exactly what an
+   * attacker substituting a lookalike address relies on nobody expanding.
+   * ------------------------------------------------------------------ */
+  'security.wallet_link_verified': Object.freeze({
+    id: 'security.wallet_link_verified',
+    category: 'security',
+    params: ['chain', 'address', 'at'],
+    path: '/wallet',
+    text: en(
+      'An external wallet was authorised for withdrawals',
+      'An external {{chain}} wallet was authorised on your account at {{at}} and can now be used as a withdrawal destination.\n\nAddress: {{address}}\n\nIf this was not you, remove it and change your password now — an authorised destination is where money leaves to.',
+    ),
+  }),
+  'security.wallet_link_revoked': Object.freeze({
+    id: 'security.wallet_link_revoked',
+    category: 'security',
+    params: ['authorisation', 'walletId', 'at'],
+    path: '/wallet',
+    text: en(
+      'An external wallet is no longer authorised',
+      'An external wallet on your account stopped being authorised for {{authorisation}} at {{at}}.\n\nWallet {{walletId}}.\n\nIf this was not you, someone else may hold your password: change it and sign out everywhere now.',
     ),
   }),
   'security.key_export_requested': Object.freeze({
