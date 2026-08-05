@@ -135,6 +135,44 @@ test('a 4xx SMTP reply retries and a 5xx does not', async () => {
   if (!permanent.ok) assert.equal(permanent.retryable, false)
 })
 
+test('a rate limit dressed as a 5xx auth failure is RETRYABLE (#201)', async () => {
+  const build = (responseCode: number, text: string) =>
+    emailAdapter({
+      smtp: { ...UNCONFIGURED, host: 'smtp.example.test', from: 'a@b.test' },
+      transport: async () => ({
+        async sendMail() {
+          throw Object.assign(new Error(text), { responseCode })
+        },
+      }),
+    })
+
+  // The exact reply this estate's provider sends when the daily allowance is gone: a 5xx AUTH
+  // code, carrying the enhanced code for "credentials invalid", for a condition that is temporary
+  // and that names its own retry-after. On the digit alone it reads permanent, which sent 707
+  // messages to `undeliverable` on 2026-08-05 — including the verification links new users need
+  // to sign in at all.
+  const quota = await build(
+    535,
+    '535 5.7.8 Your account has reached its daily sending limit. Please upgrade your plan or retry in 19m21s.',
+  ).send(message())
+  assert.equal(quota.ok, false)
+  if (!quota.ok) {
+    assert.equal(quota.retryable, true, 'a quota rejection must be retried, not discarded')
+    // Reported as an upstream problem rather than a rejection, so the dashboards do not read it
+    // as "the address does not exist".
+    assert.equal(quota.reason, 'upstream_error')
+  }
+
+  // AND THE CONTROL, or the carve-out would just be "retry every 5xx": a genuine credential
+  // failure carries none of those phrases and must still fail fast rather than burn six attempts.
+  const badCreds = await build(535, '535 5.7.8 Authentication credentials invalid').send(message())
+  assert.equal(badCreds.ok, false)
+  if (!badCreds.ok) {
+    assert.equal(badCreds.retryable, false)
+    assert.equal(badCreds.reason, 'rejected')
+  }
+})
+
 /* ------------------------------------------------------------------ gateways */
 
 test('a push or SMS channel with no gateway is no_transport, exactly like email', async () => {

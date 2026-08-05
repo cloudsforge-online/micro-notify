@@ -125,6 +125,27 @@ function classify(err: unknown): SendOutcome {
   const code = (err as { responseCode?: number } | null)?.responseCode
   const message = err instanceof Error ? err.message : String(err)
   const safe = message.slice(0, 300)
+  // THE QUOTA TEST COMES FIRST, AND IT HAS TO (#201).
+  //
+  // The digit rule below is right in general and wrong for the one reply this estate's provider
+  // actually sends most often. Mailtrap answers an exhausted daily allowance with
+  //
+  //     535 5.7.8 Your account has reached its daily sending limit ... retry in 19m21s
+  //
+  // — a 5xx AUTH code, with the enhanced code for "credentials invalid", for a condition that is
+  // temporary and that states its own retry-after in the text. Classified on the digit it is
+  // permanent, so the delivery goes to `undeliverable` and is never attempted again.
+  //
+  // That silently discarded 707 messages across the two estates on 2026-08-05, including
+  // identity's email-verification links: a user who registered inside the window never got one,
+  // could not verify, and therefore could not sign in. The plan's limit is DAILY, so this is not
+  // an edge case — it recurs every time volume crosses it.
+  //
+  // Matched on the message rather than the code, because the code is the part that lies. A
+  // genuine 5.7.8 credential failure carries none of these phrases and still fails fast.
+  if (/sending limit|rate limit|too many|quota|try again later|retry in/i.test(message)) {
+    return failure('upstream_error', true, `SMTP ${code ?? 'rate-limited'}`)
+  }
   if (typeof code === 'number') {
     if (code >= 500) return failure('rejected', false, `SMTP ${code}`)
     if (code >= 400) return failure('upstream_error', true, `SMTP ${code}`)
