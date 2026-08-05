@@ -338,6 +338,110 @@ test('a dedupe key never contains the event id for a fact that two events can de
   assert.equal(a.recipients[0].dedupeKey, b.recipients[0].dedupeKey, 'one fact, one key')
 })
 
+/**
+ * The rule that teaches this service an address, graded against the payload it will actually get.
+ *
+ * `pipeline.test.ts` proves the mail goes; this proves the rule reads the right FIELDS, which is
+ * the half a pipeline test cannot see — a rule that read the wrong key would still produce a
+ * perfectly well-formed notification, addressed to nobody, exactly as the last year of this service
+ * did. Every field below is one identity is to emit: `userId`, `handle`, `email`, `verifyUrl`.
+ *
+ * The negative half is `identity.user.registered`, and it is not padding. Its payload is
+ * `{ userId, handle, organisationId, organisationSlug }` (identity/src/users.ts:148-156) and carries
+ * **no address at all**, which is why the registration mail could never have gone out however well
+ * the SMTP was configured. A `learns` on that rule would read `undefined` and store nothing while
+ * reporting the gap closed.
+ */
+test('the verification rule reads the fields identity emits, and registration carries no address', () => {
+  const rule = RULES['identity.email.verification_requested']
+  assert.ok(rule, 'the only event in the estate that carries an email address has no rule')
+  if (!rule) return
+
+  const link = 'https://app.cloudsforge.test/verify/this-is-not-a-real-token'
+  const event = unregisteredEvent(
+    'identity.email.verification_requested',
+    ALICE,
+    { userId: ALICE, handle: 'alice', email: 'alice@example.test', verifyUrl: link },
+    { actor: `user:${ALICE}` },
+  )
+
+  assert.equal(rule.learns?.channel, 'email')
+  assert.equal(rule.learns?.read(event), 'alice@example.test')
+  // Read from the payload, never from the envelope actor — see `LearnedAddress.subject`.
+  assert.equal(rule.learns?.subject(event), ALICE)
+  const anonymous = unregisteredEvent(
+    'identity.email.verification_requested',
+    ALICE,
+    { handle: 'alice', email: 'alice@example.test' },
+    { actor: `user:${BOB}` },
+  )
+  assert.equal(rule.learns?.subject(anonymous), null, 'the actor was read as the address owner')
+
+  const set = rule.recipients(event)
+  assert.equal(set.kind, 'recipients')
+  if (set.kind !== 'recipients') return
+  assert.equal(set.recipients[0].userId, ALICE)
+  assert.equal(set.recipients[0].params['handle'], 'alice')
+  assert.equal(set.recipients[0].params['verifyUrl'], link)
+  assert.equal(set.recipients[0].subjectUrn, `cf:identity:user:${ALICE}`)
+  // Keyed on the event, uniquely among every rule in this table. Two requests are two links and
+  // two facts; collapsing them would leave a reader who asked for a second one with nothing.
+  assert.equal(set.recipients[0].dedupeKey, `account.verify_email:${event.id}`)
+
+  // And the registration event, which is where everybody assumed the address was.
+  assert.equal(RULES['identity.user.registered']?.learns, undefined)
+})
+
+test('a link this service would not put in a mail becomes the page that can issue a new one', () => {
+  const rule = RULES['identity.email.verification_requested']
+  const read = (verifyUrl: unknown) => {
+    const event = unregisteredEvent(
+      'identity.email.verification_requested',
+      ALICE,
+      { userId: ALICE, handle: 'alice', email: 'alice@example.test', verifyUrl },
+      { actor: `user:${ALICE}` },
+    )
+    const set = rule?.recipients(event)
+    return set?.kind === 'recipients' ? set.recipients[0].params['verifyUrl'] : undefined
+  }
+
+  // `renderTemplate` resolves the value with `new URL(path, base)`, which returns these unchanged
+  // — and the message exists to ask somebody to open the thing it carries.
+  for (const hostile of ['javascript:alert(1)', 'data:text/html,x', 'file:///etc/passwd', 'not a url', '', 42]) {
+    assert.equal(read(hostile), '/settings/account', `${String(hostile)} reached a mail body`)
+  }
+  // A relative fallback resolves against NOTIFY_PUBLIC_URL rather than leaving a blank link.
+  const rendered = renderTemplate(
+    TEMPLATES['account.verify_email'],
+    { handle: 'alice', verifyUrl: '/settings/account' },
+    DEFAULT_LOCALE,
+    'https://app.cloudsforge.test',
+  )
+  assert.equal(rendered.link, 'https://app.cloudsforge.test/settings/account')
+  assert.deepEqual(rendered.missing, [])
+
+  // And a real one survives untouched, query string and all.
+  assert.equal(
+    read('https://app.cloudsforge.test/verify?t=this-is-not-a-real-token'),
+    'https://app.cloudsforge.test/verify?t=this-is-not-a-real-token',
+  )
+})
+
+test('an address the producer did not send is null, never a fallback string', () => {
+  // A fallback here would write a durable channel_targets row addressed at something that is not an
+  // address, and every later delivery would fail at a provider instead of being visibly absent.
+  const rule = RULES['identity.email.verification_requested']
+  for (const email of [undefined, '', 'not-an-address', 'two words@example.test', 12]) {
+    const event = unregisteredEvent(
+      'identity.email.verification_requested',
+      ALICE,
+      { userId: ALICE, handle: 'alice', email },
+      { actor: `user:${ALICE}` },
+    )
+    assert.equal(rule?.learns?.read(event), null, `${String(email)} was kept as an address`)
+  }
+})
+
 test('every template is reachable from some rule, or is a platform template', () => {
   // Over every OUTCOME, not `rule.templateId`: a variant's template is reachable too, and reading
   // only the rule's own would have reported `withdrawal.failed_refunded` as written-but-unrendered.

@@ -35,7 +35,12 @@ export function registerServiceMetrics(metrics: Metrics): Metrics {
     })
     .register({
       name: FAILED_TOTAL,
-      help: 'Delivery attempts that failed, by channel and reason',
+      // "or could not be attempted" is not padding. `no_address` is raised in two places for one
+      // fact: by an adapter handed a delivery with no address, and by `createNotification` when a
+      // deployment whose mailer works has nobody to send to — the case that used to produce no
+      // delivery row at all and therefore no signal whatsoever. An operator alerting on mail that
+      // is not going out needs one series for both, not one per place the gap was noticed.
+      help: 'Deliveries that failed, or could not be attempted at all, by channel and reason',
       kind: 'counter',
       labels: ['channel', 'reason'],
     })

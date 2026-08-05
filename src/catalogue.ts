@@ -52,7 +52,7 @@
  */
 
 import { TOPICS, type TopicName } from '@cloudsforge/contracts-events'
-import type { Category, Priority } from './model.ts'
+import type { Category, Channel, Priority } from './model.ts'
 import type { TemplateId } from './templates.ts'
 import type { InboundEvent } from './events.ts'
 
@@ -108,6 +108,61 @@ export interface Variant {
   readonly why: string
 }
 
+/**
+ * An address this event carries, which notify may keep and deliver to.
+ *
+ * ## Why this exists at all
+ *
+ * For the whole life of this service, **no user had an address on file**. `upsertTarget` in
+ * `store.ts` had no production caller, no route in `server.ts` created a channel target, and
+ * nothing in `pipeline.ts` wrote one. `channelsAvailable` therefore answered `['in_app']` for every
+ * real person, `resolveRouting` routed to the floor channel and to nothing else, and every email
+ * notification this service has ever produced was delivered in-app and to nobody by mail — with no
+ * delivery row to look at, because a channel with no target is not a candidate. From outside it
+ * presented as "I didn't receive any registration email."
+ *
+ * ## Why it is a property of the RULE rather than a branch in the pipeline
+ *
+ * The alternative is a topic name written into `pipeline.ts`, and this catalogue exists precisely so
+ * that no module downstream of it has to know a topic's name. It is also the only shape a test can
+ * walk: a rule that declares it learns an address can be checked against its template's parameters,
+ * its `why` can be required to argue for keeping personal data, and a second rule that starts
+ * learning one is visible in the same table as the first.
+ *
+ * ## What it deliberately does not do
+ *
+ * It does not mark the address verified. `channel_targets.verified_at` stays null, because the
+ * event that teaches this service an address is a request to PROVE the address, not proof of it.
+ * Nothing in the estate emits "this address is confirmed" today, so gating delivery on
+ * `verified_at` would mean no mail was ever sent again — the same silence in a new place. When
+ * identity emits a confirmation, it becomes a rule here with a `learns` of its own, and gating
+ * becomes a one-line change to `targetsFor` that is finally safe to make.
+ */
+export interface LearnedAddress {
+  /** Never `in_app`: the floor channel has no address, and `channel_targets` refuses a row for it. */
+  readonly channel: Exclude<Channel, 'in_app'>
+  /** The address this event carries for its recipients, or null if the payload did not carry one. */
+  readonly read: (event: InboundEvent) => string | null
+  /**
+   * Whose address it is, read from the PAYLOAD and never inferred.
+   *
+   * Separate from `recipients` on purpose, and the separation is the whole safety property.
+   * `forUser` falls back to the envelope actor when the payload names nobody, which is the right
+   * answer for "who do I tell" and the wrong one for "whose address is this": a resend triggered by
+   * anybody other than the account holder would durably re-point that person's email at an inbox
+   * they do not own, and from then on every notification about their money — including the
+   * `critical` ones §10.3 will not let them mute — goes to a stranger. Notifying the wrong person is
+   * one bad notification; storing the wrong address is every future notification.
+   *
+   * So this reader must find the user explicitly or return null, and `learnAddress` stores nothing
+   * when it does. The pipeline additionally requires the answer to be one of the rule's own
+   * recipients, so a payload that names a third party cannot write a row for them either.
+   */
+  readonly subject: (event: InboundEvent) => string | null
+  /** Why notify may keep this, and what goes wrong if it is stale. Read before adding a second. */
+  readonly why: string
+}
+
 export interface Rule {
   readonly category: Category
   readonly priority: Priority
@@ -117,6 +172,8 @@ export interface Rule {
   readonly recipients: (event: InboundEvent) => RecipientSet
   /** Present only where one topic carries two materially different facts. See `Variant`. */
   readonly variant?: Variant
+  /** Present where the event carries an address this service should be able to reach later. */
+  readonly learns?: LearnedAddress
 }
 
 /** What a rule decided this particular event is: how loud, and in which words. */
@@ -279,6 +336,59 @@ const REVOCATION_REASONS: Readonly<Record<string, string>> = Object.freeze({
   signed_out_everywhere: 'you signed out everywhere',
   signed_out: 'you signed out',
 })
+
+/**
+ * An email address off a payload, or null.
+ *
+ * Deliberately not `str(payload, ['email'], '')`. An address this service is about to STORE and
+ * then send every future notification to is not the same kind of value as a wallet label: a
+ * fallback would turn a producer's omission into a durable row addressed at a string that is not an
+ * address, and every later delivery would fail `rejected` at a provider rather than being visibly
+ * absent here. So the answer to "no address on this payload" is null, and the pipeline counts it.
+ *
+ * The check is one `@` with something either side and no whitespace, and it stops there on purpose:
+ * anything more is a copy of a validator identity already ran before it accepted the address, and a
+ * second, stricter copy in a consumer is how a legal address becomes undeliverable in one service
+ * only.
+ */
+function emailOf(payload: Record<string, unknown>): string | null {
+  const value = payload['email'] ?? payload['email_address'] ?? payload['emailAddress']
+  if (typeof value !== 'string') return null
+  // Lower-cased to match the producer. identity normalises on the way in and puts a unique index on
+  // `lower(email)`, so it holds exactly one address per account and two spellings are one address to
+  // it. `channel_targets_uniq` is on the raw string, so keeping the case here would make
+  // `Alice@…` and `alice@…` two rows: `learnTarget` would deactivate one and activate the other on
+  // every alternation, churning the target ids that "which address did we send that to" depends on.
+  const address = value.trim().toLowerCase()
+  return /^[^\s@]+@[^\s@]+$/.test(address) ? address : null
+}
+
+/**
+ * A link a producer minted, or a page on this platform to fall back to.
+ *
+ * **The scheme is checked, and that is the whole of the guard.** `templates.ts` puts this value in
+ * `path`, and `renderTemplate` resolves it with `new URL(path, base)` — which happily returns a
+ * `javascript:` or `data:` URL unchanged, and would then put it in a mail body as the one thing the
+ * message asks the reader to open. The event arrives over the signed `/ingest` path so the producer
+ * is authenticated, but "the caller is authenticated" is not an argument for handing an arbitrary
+ * scheme to a mail client, and the check costs a line.
+ *
+ * The fallback is a RELATIVE path, so `new URL` resolves it against `NOTIFY_PUBLIC_URL` and the
+ * reader lands on the page where a new link can be requested. That is the honest degradation: a
+ * verification mail whose link is missing is still a mail somebody can act on, whereas a blank link
+ * resolves to the site root and tells them nothing.
+ */
+function verifyLinkOf(payload: Record<string, unknown>, fallbackPath: string): string {
+  const value = payload['verify_url'] ?? payload['verifyUrl'] ?? payload['url']
+  if (typeof value !== 'string' || value.length === 0) return fallbackPath
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    return fallbackPath
+  }
+  return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : fallbackPath
+}
 
 /** `2026-07-30 04:12 UTC`. Deterministic on purpose: `Intl` output varies by ICU build. */
 export function formatInstant(iso: string): string {
@@ -510,10 +620,65 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     priority: 'normal',
     templateId: 'account.registered',
     why: 'The first thing the platform ever says to someone.',
+    // No `learns`, and that is a statement about the producer rather than a decision here.
+    // identity's registration payload is `{ userId, handle, organisationId, organisationSlug }`
+    // (identity/src/users.ts:148-156) and carries **no address at all**, so there is nothing on this
+    // event for this service to keep. The address arrives on the verification event below.
     recipients: forUser(
       (event) => `account.registered:${event.key}`,
       (event) => ({ handle: str(event.payload, ['handle'], 'there') }),
       (event) => `cf:identity:user:${event.key}`,
+    ),
+  }),
+
+  /**
+   * How this service comes to know an email address at all — and the mail the owner did not get.
+   *
+   * ## Why the dedupe key is the event id, in the one place that is right
+   *
+   * This file's header says a dedupe key is "built from domain identifiers and never from
+   * `event.id`", and the reason is that two events can describe one fact — a new device produces
+   * two topics and must produce one alert. **A verification request is the opposite shape.** Each
+   * one mints a NEW single-use link and invalidates nothing; two requests are two facts, and a key
+   * that collapsed them would mean a reader who asked for a second link because the first went
+   * astray received nothing at all, for ever, and could never finish signing up. Redelivery of one
+   * request is already stopped where it belongs, by the inbox unique on `(topic, event_id)`.
+   *
+   * If identity ever puts a request id on the payload it should be keyed on that instead: it is the
+   * same fact under a stabler name. It does not today, and the token is emphatically not a
+   * candidate — `dedupe_key` is returned by `GET /notifications`.
+   *
+   * ## `high`, not `critical`
+   *
+   * §10.3's critical list is closed and `catalogue.test.ts` pins it to exactly eight topics. This is
+   * not on it and must not join it: `critical` means "delivered whatever the user's preferences
+   * say", which is right for a key leaving and wrong for a message the reader can ask for again.
+   * `high` clears every default preference (`DEFAULT_PREFERENCE`, `routing.ts`), and a brand-new
+   * account has no preferences to clear anyway.
+   */
+  'identity.email.verification_requested': Object.freeze({
+    category: 'account',
+    priority: 'high',
+    templateId: 'account.verify_email',
+    why: 'The address is unusable until it is proved, and this is the only message that proves it. It is also the mail whose absence was reported: the estate had every SMTP variable set and no user with an address to send to.',
+    learns: {
+      channel: 'email' as const,
+      read: (event: InboundEvent) => emailOf(event.payload),
+      // The payload, and nothing else. Not `userIdOf`, whose last resort is the envelope actor —
+      // see `LearnedAddress.subject` for what that costs when a resend is triggered by anybody but
+      // the account holder.
+      subject: (event: InboundEvent) => str(event.payload, ['user_id', 'userId'], '') || null,
+      why: 'identity owns the address and holds exactly one per user (`users_email_lower_uniq`). This is a mirror kept so that a withdrawal alert at three in the morning does not depend on identity answering; `learnTarget` in store.ts keeps it to one active row so the mirror cannot fan out. It goes stale if the address changes in identity and identity announces no such change — that is a named gap, not an accepted one, and it closes the day identity emits the event, which becomes a `learns` here and nothing else.',
+    },
+    recipients: forUser(
+      (event) => `account.verify_email:${event.id}`,
+      (event) => ({
+        handle: str(event.payload, ['handle'], 'there'),
+        // Falls back to the page that can issue a new link. See `verifyLinkOf`: a scheme this
+        // service will not put in a mail body degrades to the same place.
+        verifyUrl: verifyLinkOf(event.payload, '/settings/account'),
+      }),
+      (event) => `cf:identity:user:${str(event.payload, ['user_id', 'userId'], event.key)}`,
     ),
   }),
 

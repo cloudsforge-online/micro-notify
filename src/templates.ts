@@ -18,7 +18,7 @@
  * live credential in a log line. Log the template id and the parameter *names*; never the values.
  */
 
-import type { Category, Locale } from './model.ts'
+import type { Category, Channel, Locale } from './model.ts'
 import { DEFAULT_LOCALE } from './model.ts'
 
 export interface TemplateText {
@@ -31,6 +31,31 @@ export interface Template {
   readonly category: Category
   /** Names that must be present in `params`. Checked by the catalogue test, not at runtime. */
   readonly params: readonly string[]
+  /**
+   * Parameters that are single-use credentials rather than domain data.
+   *
+   * A verification link is a bearer token in a URL: whoever reads it can complete the action it
+   * authorises. It has to be stored — the delivery is written now and rendered later, possibly
+   * after a retry — but it must never leave over HTTP, and `GET /notifications` returns the whole
+   * `params` object to the user AND to an operator with the admin role reading `?userId=`. So the
+   * names are declared here and `redactSecretParams` is applied at the one place every notification
+   * row becomes a response (`store.ts`, `toNotification`).
+   *
+   * Declaring one obliges the template to declare `deliverOn` as well; `templates.test.ts` asserts
+   * the pairing, because a credential that is safe to store and safe to mail is not thereby safe to
+   * sign and POST to a developer's endpoint.
+   */
+  readonly secretParams?: readonly string[]
+  /**
+   * The channels this template may be delivered on, when it may not go everywhere.
+   *
+   * Absent — the normal case — means every channel the user can be reached on. Present, it narrows
+   * the candidates in `createNotification` before routing, so a notification whose body is only
+   * meaningful at one address cannot fan out to every target the user happens to hold. `in_app` is
+   * the floor channel and is never removed by this: it carries no address, it is what §10.3's "at
+   * least one channel" rests on, and its parameters are redacted on the way out.
+   */
+  readonly deliverOn?: readonly Channel[]
   /**
    * Where the notification points, relative to `NOTIFY_PUBLIC_URL`. Substituted from the same
    * parameters. Relative because the origin is configuration: a link built from a request's Host
@@ -121,6 +146,39 @@ export const TEMPLATES = Object.freeze({
     params: ['handle'],
     path: '/',
     text: en('Welcome to CloudsForge', 'Your account @{{handle}} is ready.'),
+  }),
+  /**
+   * The first mail the platform sends, and the only one that has to arrive before anything else can.
+   *
+   * ## The link is the whole message, so the link is the whole risk
+   *
+   * `path` is the parameter rather than a route on this platform. Every other template points at a
+   * page and lets the reader sign in; this one carries a credential minted by identity, and there
+   * is nothing on this side to point at instead. Two consequences are declared above rather than
+   * remembered: `verifyUrl` is a `secretParams`, so it is redacted out of every HTTP response, and
+   * `deliverOn` is email alone, so it cannot be signed and POSTed to a developer's webhook endpoint
+   * by the ordinary fan-out. `catalogue.ts`'s reader refuses anything that is not an http(s) URL and
+   * falls back to the account settings page, so a producer that stops sending it degrades to a page
+   * that can issue a new link rather than to a broken or hostile one.
+   *
+   * The body does not repeat `{{verifyUrl}}`: `email.ts` appends the rendered link after the body,
+   * and printing it twice in a plain-text mail is how a reader ends up clicking the wrong one.
+   *
+   * The last sentence is anti-phishing wording and is not decoration. A single-use link in an inbox
+   * is the highest-value thing this service will ever send, and "nobody here will ever ask you to
+   * send it to them" is the one instruction that survives being forwarded to an attacker.
+   */
+  'account.verify_email': Object.freeze({
+    id: 'account.verify_email',
+    category: 'account',
+    params: ['handle', 'verifyUrl'],
+    secretParams: ['verifyUrl'],
+    deliverOn: ['email'] as const,
+    path: '{{verifyUrl}}',
+    text: en(
+      'Confirm your email address',
+      'Hello @{{handle}} — one step is left: confirm this address, and your CloudsForge account is ready.\n\nThe link in this email works once and then expires. If it has already expired, ask for a new one from your account settings — nobody at CloudsForge can resend the old one, and nobody here will ever ask you to send it to them.',
+    ),
   }),
   'wallet.created': Object.freeze({
     id: 'wallet.created',
@@ -518,6 +576,40 @@ export function isTemplateId(value: string): value is TemplateId {
 
 export function templateFor(id: TemplateId): Template {
   return TEMPLATES[id]
+}
+
+/** The value a redacted parameter is replaced by. Visible, so it reads as removed, not as absent. */
+export const REDACTED = '[redacted]'
+
+/**
+ * Blank the parameters a template declares as single-use credentials.
+ *
+ * Applied where a stored notification row becomes something a caller can read — `store.ts`,
+ * `toNotification` — and nowhere near the dispatch path, which reads `notifications.params`
+ * straight out of its own query and must still be able to render the real link.
+ *
+ * **Replaced rather than deleted.** An absent key reads as "the producer never sent it", which is a
+ * different fact and one somebody would go and investigate; a visible marker says the value exists
+ * and is deliberately not being shown. The estate has been burned once by a live credential in a
+ * log line, and this is the same value arriving by a different door: `GET /notifications` returns
+ * the whole parameter object, and an operator with the admin role may ask for another user's.
+ *
+ * An unknown template id redacts nothing, which is the same degradation `messageFor` makes for a
+ * template a deploy has removed. It is safe here because a template that has been deleted cannot
+ * have declared a secret parameter that a rule is still supplying.
+ */
+export function redactSecretParams(
+  templateId: string,
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!isTemplateId(templateId)) return params
+  const secret = templateFor(templateId).secretParams
+  if (!secret || secret.length === 0) return params
+  const out = { ...params }
+  for (const name of secret) {
+    if (Object.hasOwn(out, name)) out[name] = REDACTED
+  }
+  return out
 }
 
 export interface Rendered {

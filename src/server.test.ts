@@ -160,6 +160,10 @@ async function harness(principal: Principal | Error = USER): Promise<Harness> {
     publicUrl: 'https://app.cloudsforge.test',
     maxAttempts: 6,
     instanceId: 'test',
+    // Never read here: nothing in this suite creates a notification, which is the only place it is
+    // consulted. Present because `PipelineDeps` requires it, and it requires it because a composition
+    // root that forgot it would silently switch off the signal that says mail reaches nobody.
+    emailConfigured: false,
   }
 
   const deps: ServerDeps = {
@@ -483,6 +487,34 @@ test('a broadcast may not be critical', async () => {
   // The §10.3 exception exists for facts about a user's own account, not for announcements. An
   // operator broadcast that ignores every preference is a megaphone.
   assert.equal(response.status, 400)
+})
+
+/**
+ * A broadcast may not render a template that carries a single-use credential.
+ *
+ * `account.verify_email` puts its `verifyUrl` parameter straight into the mail as the one thing the
+ * message asks the reader to open, and the scheme guard that refuses a `javascript:` URL lives in
+ * the catalogue rule — on the `/ingest` path, where the value comes from a signed producer event.
+ * Nothing on this route goes anywhere near it: `params` is taken from the request body as-is. So an
+ * operator, or a stolen admin token, could mail every reachable user a link of their choosing under
+ * a subject line that says CloudsForge minted it — the most convincing phishing message the estate
+ * is capable of sending, sent by the estate.
+ *
+ * Refused by the property rather than by the template id, so the next template that carries a
+ * credential is covered without anybody remembering to add it here.
+ */
+test('a broadcast may not use a template that carries a single-use credential', async () => {
+  const rig = await start(ADMIN)
+  const response = await fetch(`${rig.url}/admin/broadcasts`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer t', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      templateId: 'account.verify_email',
+      params: { handle: 'someone', verifyUrl: 'https://not-cloudsforge.example.test/harvest' },
+    }),
+  })
+  assert.equal(response.status, 400)
+  assert.deepEqual(rig.calls.broadcasts, [], 'the fan-out was queued anyway')
 })
 
 test('the dead-letter view requires an admin and defaults to the terminal states', async () => {

@@ -62,7 +62,7 @@ import {
 import { ingestEvent, type PipelineDeps } from './pipeline.ts'
 import type { Preference } from './routing.ts'
 import type { NotifyStore } from './store.ts'
-import { isTemplateId } from './templates.ts'
+import { isTemplateId, templateFor } from './templates.ts'
 
 /** The verifier as this file needs it. An interface, so a test does not need a JWKS. */
 export interface PrincipalVerifier {
@@ -500,6 +500,21 @@ function buildRoutes(): Route[] {
 
         const templateId = typeof body['templateId'] === 'string' ? body['templateId'] : 'system.broadcast'
         if (!isTemplateId(templateId)) throw new BadRequestError(`unknown template: ${templateId}`)
+        if ((templateFor(templateId).secretParams ?? []).length > 0) {
+          // A template that carries a single-use credential renders whatever `params` it is handed,
+          // and this route takes `params` from the request body untouched. The scheme guard that
+          // refuses a `javascript:` link lives in the catalogue rule, on the `/ingest` path where
+          // the value comes from a signed producer event — nothing here goes near it. So this would
+          // let an operator, or a stolen admin token, mail every reachable user a link of their
+          // choosing under a subject line that says CloudsForge minted it: the most convincing
+          // phishing message the estate is capable of sending, sent by the estate.
+          //
+          // Refused by the property rather than by the id, so the next credential-carrying template
+          // is covered without anybody remembering this line.
+          throw new BadRequestError(
+            `${templateId} carries a single-use credential and cannot be broadcast; it is addressed to one person by the event that mints it`,
+          )
+        }
         const category = typeof body['category'] === 'string' ? body['category'] : 'system'
         if (!isCategory(category)) throw new BadRequestError(`unknown category: ${category}`)
         const priority = typeof body['priority'] === 'string' ? body['priority'] : 'normal'

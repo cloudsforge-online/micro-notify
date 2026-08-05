@@ -25,7 +25,14 @@
 
 import { backoffFor } from '@cloudsforge/jobs'
 import type { Logger, Metrics } from '@cloudsforge/telemetry'
-import { ERASURE_TOPICS, outcomeOf, ruleFor, type Recipient } from './catalogue.ts'
+import {
+  ERASURE_TOPICS,
+  outcomeOf,
+  ruleFor,
+  type Recipient,
+  type RecipientSet,
+  type Rule,
+} from './catalogue.ts'
 import type { AdapterRegistry, OutboundMessage } from './channels.ts'
 import type { InboundEvent } from './events.ts'
 import {
@@ -46,7 +53,13 @@ import {
   type Priority,
   type SuppressionReason,
 } from './model.ts'
-import { nextDigestWindow, periodName, resolveRouting, type Route } from './routing.ts'
+import {
+  nextDigestWindow,
+  periodName,
+  resolveRouting,
+  type Route,
+  type Routing,
+} from './routing.ts'
 import {
   claimDeliveries,
   deliveriesFor,
@@ -55,6 +68,7 @@ import {
   insertDeliveries,
   insertNotification,
   joinDigest,
+  learnTarget,
   listPreferences,
   markBroadcastFannedOut,
   markDeliveryFailed,
@@ -68,7 +82,13 @@ import {
   type Db,
   type Tx,
 } from './store.ts'
-import { isTemplateId, renderTemplate, templateFor, type TemplateId } from './templates.ts'
+import {
+  isTemplateId,
+  renderTemplate,
+  templateFor,
+  type Template,
+  type TemplateId,
+} from './templates.ts'
 
 export interface PipelineDeps {
   readonly sql: Db
@@ -79,6 +99,17 @@ export interface PipelineDeps {
   readonly publicUrl: string
   readonly maxAttempts: number
   readonly instanceId: string
+  /**
+   * Whether this deployment has a mail transport at all — `smtpConfigured(env.smtp)`.
+   *
+   * Required rather than optional, and that is the point of it. An optional flag defaulting to
+   * false would let a future composition root omit it and silently switch off the one signal that
+   * says mail is reaching nobody, which is the exact class of defect this field exists to report.
+   * Read only to decide whether a missing address is worth counting: an SMTP-less deployment is a
+   * supported way to run (`email.ts`), and putting a permanent non-zero rate on the series an
+   * operator alerts on is how a signal becomes wallpaper.
+   */
+  readonly emailConfigured: boolean
   /** Test seams. Production passes neither. */
   readonly now?: () => Date
   readonly backoff?: (attempt: number) => number
@@ -121,16 +152,20 @@ export async function createNotification(
   deps: PipelineDeps,
   request: NotificationRequest,
 ): Promise<CreateOutcome> {
+  const template = templateFor(request.templateId)
   const targets = await targetsFor(tx, request.userId)
   const preferences = await listPreferences(tx, request.userId)
-  const available = channelsAvailable(targets)
+  const available = channelsAvailable(targets, template.deliverOn ?? null)
 
-  const routing = resolveRouting({
-    priority: request.priority,
-    category: request.category,
-    availableChannels: available,
-    preferences,
-  })
+  const routing = deliverNow(
+    template,
+    resolveRouting({
+      priority: request.priority,
+      category: request.category,
+      availableChannels: available,
+      preferences,
+    }),
+  )
 
   if (routing.kind === 'suppressed') {
     // Recorded, not discarded. A user asking "why did I not get told" needs a row that says so,
@@ -176,6 +211,13 @@ export async function createNotification(
     })
   }
 
+  // After the insert, so it counts notifications that were actually written and actually routed.
+  // Reporting before the routing decision would have counted a notification the user's preferences
+  // suppressed anyway, and — far worse — one per user per re-run of a broadcast fan-out, which is a
+  // job that is retried on crash. The series would then be dominated by re-runs rather than by mail
+  // failing to arrive, which is the way this signal would have become wallpaper.
+  reportUnaddressed(deps, request, template, available)
+
   deps.metrics.increment(NOTIFICATIONS_TOTAL, {
     category: request.category,
     priority: request.priority,
@@ -184,16 +226,106 @@ export async function createNotification(
 }
 
 /**
- * Which channels this user can be reached on.
+ * Which channels this user can be reached on, for this notification.
  *
  * The floor channel is unconditional; everything else needs an address. Routing to a channel with
  * no address would create a delivery that can only ever fail `no_address`, which is noise in the
- * dead-letter view rather than information about anything.
+ * dead-letter view rather than information about anything — the argument `routing.ts` makes at
+ * length, and the reason the absence is reported as a counter instead (see `reportUnaddressed`).
+ *
+ * `allowed` is a template's `deliverOn`, absent for all but one template today. It narrows the
+ * candidates and never widens them, and it cannot remove the floor channel — §10.3 rests on
+ * `in_app` being available unconditionally, and a template restriction is a statement about where a
+ * message makes sense, not a licence to route a critical notification to nothing.
  */
-function channelsAvailable(targets: readonly ChannelTarget[]): Channel[] {
+function channelsAvailable(
+  targets: readonly ChannelTarget[],
+  allowed: readonly Channel[] | null,
+): Channel[] {
   const channels = new Set<Channel>([FLOOR_CHANNEL])
-  for (const target of targets) channels.add(target.channel)
+  for (const target of targets) {
+    if (allowed !== null && !allowed.includes(target.channel)) continue
+    channels.add(target.channel)
+  }
   return [...channels]
+}
+
+/**
+ * A single-use credential is delivered now, whatever cadence the reader asked for.
+ *
+ * ## The failure this exists to stop, which every other guard is quiet about
+ *
+ * A user with `digest: 'daily'` on their account preferences asks for a verification link. Nothing
+ * complains: the address is on file, so `reportUnaddressed` is silent; `deliverOn` picks the right
+ * channel; the routing is legal; the notification is written. But `deliveriesFor` writes a delivery
+ * only for an `instant` route, and `flushDueDigests` renders a batched item through `describe()`,
+ * which substitutes the SUBJECT and nothing else — so the link is never rendered anywhere at all.
+ * It is redacted out of every HTTP response as well, by design. The reader gets a summary the next
+ * morning saying they were asked to confirm their address, and no way to do it, for ever.
+ *
+ * ## Why it is derived from `secretParams` rather than declared again
+ *
+ * A second opt-in field is a second thing to forget, and forgetting it is silent. The two properties
+ * are the same property: a value that must be redacted out of every read route is one the reader can
+ * only ever act on through the message itself, so a copy of that message which drops the value is
+ * not a delayed delivery — it is no delivery. Batching one is meaningless in every case, which is
+ * exactly when the rule belongs in the mechanism instead of in a field.
+ *
+ * The preference is not overridden in any way the user would notice as a loss: they asked for their
+ * account mail in a daily batch and this is not batchable, so it arrives on its own. Nothing is
+ * suppressed, no channel is added, and a channel the preference filter removed stays removed.
+ */
+function deliverNow(template: Template, routing: Routing): Routing {
+  if (routing.kind !== 'deliver') return routing
+  if (!template.secretParams || template.secretParams.length === 0) return routing
+  const [first, ...rest] = routing.routes.map((route): Route => ({ channel: route.channel, when: 'instant' }))
+  if (!first) return routing
+  return { kind: 'deliver', routes: [first, ...rest] }
+}
+
+/**
+ * Say when a working mailer is about to reach nobody.
+ *
+ * ## The defect this closes
+ *
+ * A user with no `email` target is not routed to email at all, so no delivery row is written, so
+ * nothing appears in `GET /admin/deliveries`, nothing is logged and nothing is counted. That is
+ * correct behaviour for a deployment with no SMTP — `no_transport` is the honest reading and
+ * `email.ts` argues for it — and it is a **silent failure** on a deployment whose transport works,
+ * which is what the estate has been running: eight `SMTP_*` variables set, `notify` healthy, and
+ * not one user in the database with an address to send to. From outside, mail simply never arrived
+ * and no dashboard in the estate had a number that moved.
+ *
+ * ## Why it reuses `notify_failed_total` rather than minting a series
+ *
+ * The question an operator has is "how much mail is this deployment failing to send, and why", and
+ * it should have one answer. `email.ts` already returns `no_address` when a delivery reaches the
+ * adapter without one, counted with exactly these labels at `dispatchDue`. Splitting the same fact
+ * across two metric names according to WHERE it was noticed is the drift this service's own
+ * comments argue against everywhere else, and an alert written against one of them would be blind
+ * to the other — which is the more common case by far.
+ *
+ * The log line is per notification and is meant to be: on a healthy deployment it is silent, and on
+ * this one the volume is the finding. It carries the user id, the category and the template id, and
+ * no parameters — a template parameter is arbitrary domain data and one of them is a credential.
+ */
+function reportUnaddressed(
+  deps: PipelineDeps,
+  request: NotificationRequest,
+  template: Template,
+  available: readonly Channel[],
+): void {
+  if (!deps.emailConfigured) return
+  if (available.includes('email')) return
+  // A template that may not be delivered by email is not failing to be; it was never going.
+  if (template.deliverOn && !template.deliverOn.includes('email')) return
+
+  deps.metrics.increment(FAILED_TOTAL, { channel: 'email', reason: 'no_address' })
+  deps.logger.warn('no email address on file; this notification reaches nobody by mail', {
+    userId: request.userId,
+    category: request.category,
+    templateId: request.templateId,
+  })
 }
 
 /* ------------------------------------------------------------------ ingest */
@@ -242,6 +374,12 @@ export async function ingestEvent(
       return { kind: 'ignored', reason: set.reason } satisfies IngestOutcome
     }
 
+    // BEFORE the notifications, and in the same transaction as them. That ordering is the whole
+    // repair: the event that carries an address is usually the one that most needs to reach it, so
+    // learning the address afterwards would send the very first mail to nobody and only work from
+    // the second event onwards — which, for a verification link, means never.
+    await learnAddress(tx, deps, rule, event, set)
+
     // Resolved from the EVENT, not read off the rule: one topic can carry two facts, and
     // `settlement.outbound.failed` is the one that does — `refundable` decides whether this is a
     // critical "your money is held" or a high "it is coming back". See `Variant` in catalogue.ts.
@@ -259,6 +397,68 @@ export async function ingestEvent(
 
   if (outcome.status === 'duplicate') return { kind: 'duplicate_event' }
   return outcome.value
+}
+
+/**
+ * Keep the address a rule says this event carries.
+ *
+ * See `LearnedAddress` in `catalogue.ts` for why this service holds an address at all, and
+ * `learnTarget` in `store.ts` for why the user's other addresses on the channel are retired rather
+ * than left beside it.
+ *
+ * **A rule that declares it learns an address, given a payload with none, is reported.** Silence
+ * there would be the original defect wearing a new coat: the notification would be written, look
+ * perfectly well formed, deliver in-app, and never reach the inbox it was written for — which is
+ * exactly what the last year of this service looked like from outside. The address itself is never
+ * logged; the topic and the channel are enough to find the producer, and an email address is
+ * personal data this service is holding on someone else's behalf.
+ */
+async function learnAddress(
+  tx: Tx,
+  deps: PipelineDeps,
+  rule: Rule,
+  event: InboundEvent,
+  set: Extract<RecipientSet, { kind: 'recipients' }>,
+): Promise<void> {
+  const learns = rule.learns
+  if (!learns) return
+
+  const address = learns.read(event)
+  if (address === null) {
+    // Logged, and deliberately NOT counted here. `reportUnaddressed` fires a moment later for the
+    // notification this event is about to produce, because the address it would have needed is the
+    // one that did not arrive — so counting in both places would put two increments on one fact and
+    // overstate the series an operator alerts on. The log is what says WHICH of the two shapes this
+    // is: a producer that stopped sending a field, rather than an account that never had one.
+    deps.logger.warn('an event that should have carried an address carried none', {
+      topic: event.topic,
+      channel: learns.channel,
+    })
+    return
+  }
+
+  // Whose address it is, from the payload — never from the actor, and never "every recipient".
+  // A rule with more than one recipient that learned an address would give the whole group one
+  // inbox and switch off each of their real ones, which no future rule should be able to do by
+  // accident. See `LearnedAddress.subject`.
+  const subject = learns.subject(event)
+  if (subject === null || !set.recipients.some((recipient) => recipient.userId === subject)) {
+    deps.logger.warn('an event carried an address but named nobody it belongs to', {
+      topic: event.topic,
+      channel: learns.channel,
+    })
+    return
+  }
+
+  await learnTarget(tx, {
+    userId: subject,
+    channel: learns.channel,
+    address,
+    // Provenance, in the column an operator reading `channel_targets` by hand will see. It says
+    // the platform put this row there rather than the person, which is the difference that
+    // matters when somebody asks why they are receiving mail at an address they never gave us.
+    label: event.topic,
+  })
 }
 
 function requestFor(

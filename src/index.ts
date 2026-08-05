@@ -26,7 +26,7 @@ import { SCHEMA_VERSION } from './migrations.ts'
 import { registerServiceMetrics, DELIVERIES_DEAD, DELIVERIES_PENDING, DIGESTS_OPEN } from './metrics.ts'
 import { createServer } from './server.ts'
 import { BROADCAST_KIND, DISPATCH_KIND, registerHandlers, rescheduleRecurring, seedRecurring } from './jobs.ts'
-import { emailAdapter } from './email.ts'
+import { emailAdapter, smtpConfigured } from './email.ts'
 import { gatewayAdapter, inAppAdapter, registryOf } from './channels.ts'
 import { webhookAdapter } from './webhook.ts'
 import { deliveryStats, openDigestCount, postgresNotifyStore } from './store.ts'
@@ -125,6 +125,11 @@ const pipeline: PipelineDeps = {
   publicUrl: env.publicUrl,
   maxAttempts: env.deliveryMaxAttempts,
   instanceId: env.instanceId,
+  // The same predicate the adapter uses to decide whether it can send at all, read once here so
+  // the pipeline and the adapter cannot disagree about whether this deployment has a mailer. It
+  // decides whether a notification that reaches nobody by email is counted: on a deployment with
+  // no SMTP that is a configuration choice, and on this one it is the defect the owner reported.
+  emailConfigured: smtpConfigured(env.smtp),
 }
 
 // 7. Routes. Constructed after the Lifecycle so the health handlers report real state, and after

@@ -30,6 +30,7 @@ import type {
   SuppressionReason,
 } from './model.ts'
 import type { Preference, Route } from './routing.ts'
+import { redactSecretParams } from './templates.ts'
 
 export type Db = Sql
 export type Tx = TransactionSql
@@ -122,13 +123,26 @@ interface NotificationRow {
   readonly read_at: Date | null
 }
 
+/**
+ * A row as a caller may see it — which is not quite as it is stored.
+ *
+ * `params` is redacted here, and here is the choke point on purpose: every path that turns a
+ * notification row into something a caller can read goes through this function, so there is no
+ * route left that could return a template's single-use credential by forgetting to. `GET
+ * /notifications` returns the whole parameter object, and an operator with the admin role may ask
+ * for another user's — so "the user's own link, to the user" is not the only reading of it.
+ *
+ * The dispatch path does not come through here at all: `claimDeliveries` selects `n.params` in its
+ * own query and hands the real value to the adapter, which is what lets the mail still carry the
+ * link this function refuses to return. That separation is why the redaction can be unconditional.
+ */
 const toNotification = (row: NotificationRow): Notification => ({
   id: row.id,
   userId: row.user_id,
   category: row.category as Category,
   priority: row.priority as Priority,
   templateId: row.template_id,
-  params: row.params,
+  params: redactSecretParams(row.template_id, row.params),
   locale: row.locale as Locale,
   dedupeKey: row.dedupe_key,
   subjectUrn: row.subject_urn,
@@ -369,6 +383,58 @@ export async function upsertTarget(
   const row = rows[0]
   if (!row) throw new Error('upsert returned no row')
   return row.id
+}
+
+/**
+ * Record the one address a producer told us to reach this user on, and retire any other.
+ *
+ * The difference from `upsertTarget` is the second statement, and it is not a tidiness measure.
+ * `channel_targets_uniq` is on `(user_id, channel, address)`, so upserting a CHANGED address inserts
+ * a second row rather than updating the first — and `deliveriesFor` writes one delivery per target,
+ * deliberately, so that a developer with three webhook endpoints reaches all three. Applied to a
+ * learned address that would mean every future notification sent twice, once to an address the
+ * person has already abandoned: the worst possible reading of an alert about their own money, from
+ * an inbox they no longer control.
+ *
+ * One active row is right for a LEARNED address specifically, because identity holds exactly one
+ * email per user (`users_email_lower_uniq`) and this is a mirror of that column. It would be wrong
+ * for a target a user registered themselves, which is why this is a second function rather than a
+ * flag on the first.
+ *
+ * **And that is a precondition, not a comment.** The `where` clause below is scoped to
+ * `(user_id, channel)`, so it retires every target on the channel — including one somebody added
+ * deliberately. That is safe today only because nothing in this service lets them: no route in
+ * `server.ts` creates a channel target, and this function and the test suite are the only writers.
+ * The day a "add another address" route exists, learned rows need marking as such — a column, so a
+ * migration — and this clause has to narrow to them. Adding the route without narrowing this would
+ * switch off an address a user explicitly asked for, with no row they can see and no log line.
+ *
+ * The old row is deactivated, not deleted. `deliveries.target_id` references it `on delete set
+ * null`, so deleting it would blank the address on the delivery history for every message already
+ * sent there — and "which address did we send that to" is the first question asked when somebody
+ * says they never received it. `verified_at` is untouched and stays null: see `LearnedAddress`.
+ */
+export async function learnTarget(
+  sql: Db | Tx,
+  input: {
+    readonly userId: string
+    readonly channel: Channel
+    readonly address: string
+    readonly label?: string | null
+  },
+): Promise<string> {
+  const id = await upsertTarget(sql, {
+    userId: input.userId,
+    channel: input.channel,
+    address: input.address,
+    ...(input.label === undefined ? {} : { label: input.label }),
+  })
+  await sql`
+    update channel_targets
+       set active = false
+     where user_id = ${input.userId} and channel = ${input.channel} and id <> ${id} and active
+  `
+  return id
 }
 
 /* ------------------------------------------------------------------ deliveries */

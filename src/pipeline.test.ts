@@ -969,4 +969,289 @@ describe('pipeline', { skip }, () => {
     // Counted, so an operator sees a producer to page rather than silence. Two events, two counts.
     assert.equal(counterValue(rig.metrics, 'notify_suppressed_total', { reason: 'no_recipient' }), 2)
   })
+
+  /* ---------------------------------------------------------------- how notify learns an address
+   *
+   * **No user in this estate has ever had an email address in this service.** `upsertTarget`
+   * (`store.ts`) had exactly one caller when this section was written, and it was this file:
+   * nothing in `server.ts` creates a channel target and nothing in `pipeline.ts` did either. So
+   * `channelsAvailable` (`pipeline.ts`) returned `['in_app']` for every real user, `resolveRouting`
+   * routed to the floor channel and nowhere else, and every email notification the service has ever
+   * produced was delivered in-app and silently to nobody by mail. The owner reported it the way it
+   * presents from outside: "I didn't receive any registration email."
+   *
+   * The four tests below are the two halves of the repair, each driven end to end:
+   *
+   *   - an event that CARRIES an address teaches this service the address, in the same transaction
+   *     that writes the notification, so the very mail that taught it goes out;
+   *   - a notification that could have gone by email and reached nobody is COUNTED, on a deployment
+   *     whose transport works, so the residue — every account registered before this landed — is a
+   *     number an operator can read rather than a silence.
+   */
+
+  /**
+   * Obviously not a credential, and it must stay that way.
+   *
+   * A verification link is a single-use bearer token in a URL. This one is a fixture, so it says so
+   * in its own path; a fixture that looks like a live link is one grep away from being read as a
+   * leak, and this repository's own rule is that no test prints anything that resembles a secret.
+   */
+  const VERIFY_LINK = 'https://app.cloudsforge.test/verify/this-is-not-a-real-token'
+
+  const verification = (payload: Record<string, unknown>) =>
+    unregisteredEvent('identity.email.verification_requested', ALICE, payload, {
+      actor: `user:${ALICE}`,
+    })
+
+  test('a verification request teaches notify the address, and the first mail actually goes', async () => {
+    const rig = testRig(sql)
+
+    const outcome = await ingestEvent(
+      rig.deps,
+      verification({
+        userId: ALICE,
+        handle: 'alice',
+        email: 'alice@example.test',
+        verifyUrl: VERIFY_LINK,
+      }),
+    )
+    assert.equal(outcome.kind, 'processed')
+
+    const targets = await sql<Array<{ channel: string; address: string; verified_at: Date | null }>>`
+      select channel, address, verified_at from channel_targets where user_id = ${ALICE} and active
+    `
+    assert.equal(targets.length, 1, 'the event carried an address and this service kept it')
+    assert.equal(targets[0]?.channel, 'email')
+    assert.equal(targets[0]?.address, 'alice@example.test')
+    assert.equal(targets[0]?.verified_at, null, 'unverified: identity has not said the address is real')
+
+    const summary = await dispatchDue(rig.deps, 50)
+    assert.equal(summary.sent, 2, 'in-app and, for the first time in this service, email')
+    const mail = rig.adapters.email.sent[0]?.message
+    assert.equal(mail?.address, 'alice@example.test')
+    assert.equal(mail?.link, VERIFY_LINK, 'the link in the mail is the one identity minted')
+    assert.match(mail?.subject ?? '', /confirm/i)
+  })
+
+  test('a second request at a new address replaces the first, rather than mailing both', async () => {
+    // identity holds ONE address per user (`users_email_lower_uniq`), so this service's mirror of
+    // it holds one too. `channel_targets_uniq` is on (user, channel, address), so a plain upsert of
+    // a changed address leaves two ACTIVE rows — and `deliveriesFor` writes one delivery per
+    // target, deliberately, so a developer's three webhook endpoints all fire. Applied to a learned
+    // address that means every LATER notification sent twice, one of them to an inbox the person
+    // has already given up.
+    const rig = testRig(sql)
+    await ingestEvent(rig.deps, verification({ userId: ALICE, handle: 'alice', email: 'old@example.test', verifyUrl: VERIFY_LINK }))
+    await ingestEvent(rig.deps, verification({ userId: ALICE, handle: 'alice', email: 'new@example.test', verifyUrl: VERIFY_LINK }))
+
+    const rows = await sql<Array<{ address: string; active: boolean }>>`
+      select address, active from channel_targets where user_id = ${ALICE} and channel = 'email'
+      order by address
+    `
+    assert.deepEqual(rows.map((row) => ({ address: row.address, active: row.active })), [
+      // Deactivated rather than deleted: `deliveries.target_id` is `on delete set null`, and
+      // blanking it would erase which address every message already sent there went to.
+      { address: 'new@example.test', active: true },
+      { address: 'old@example.test', active: false },
+    ])
+
+    // The LATER notification is the one that must not double. Each verification mail is still
+    // addressed to the inbox whose link it carries — the first one was minted for old@ and
+    // delivering it anywhere else would prove nothing about that address.
+    await ingestEvent(
+      rig.deps,
+      registeredEvent('custody.key.exported', ALICE, { user_id: ALICE, key_id: 'key-1' }),
+    )
+    await dispatchDue(rig.deps, 50)
+    const alerted = rig.adapters.email.sent
+      .filter((each) => each.message.templateId === 'security.key_exported')
+      .map((each) => each.message.address)
+    assert.deepEqual(alerted, ['new@example.test'], 'one alert, to the address in use')
+  })
+
+  /**
+   * The half that makes the residue visible.
+   *
+   * Every account that existed before the repair has no address here and will not get one until an
+   * event carrying it arrives. That population is exactly the owner's complaint, and the thing that
+   * must not happen again is it being invisible: an email-category notification on a deployment
+   * with a WORKING transport, reaching nobody by mail, previously produced no delivery row, no log
+   * line, no metric and nothing in `GET /admin/deliveries`.
+   */
+  test('a working mailer that reaches nobody is counted, not silent', async () => {
+    const rig = testRig(sql, { emailConfigured: true })
+
+    await ingestEvent(
+      rig.deps,
+      registeredEvent('custody.key.exported', ALICE, { user_id: ALICE, key_id: 'key-1' }),
+    )
+
+    assert.equal(
+      counterValue(rig.metrics, 'notify_failed_total', { channel: 'email', reason: 'no_address' }),
+      1,
+      'a configured mailer reached nobody and nothing counted it',
+    )
+  })
+
+  test('an unconfigured mailer counts nothing, because sending no mail is a supported way to run', async () => {
+    // `no_transport` is the honest reading for a deployment with no SMTP (see `email.ts`), and it
+    // is already counted where it happens. Counting `no_address` as well would put a permanent
+    // non-zero rate on the one series an operator would use to alert on broken mail, which is how
+    // a signal becomes wallpaper.
+    const rig = testRig(sql, { emailConfigured: false })
+
+    await ingestEvent(
+      rig.deps,
+      registeredEvent('custody.key.exported', ALICE, { user_id: ALICE, key_id: 'key-1' }),
+    )
+
+    assert.equal(
+      counterValue(rig.metrics, 'notify_failed_total', { channel: 'email', reason: 'no_address' }),
+      0,
+    )
+  })
+
+  /**
+   * The link is a single-use credential, and this is every route it could have left by.
+   *
+   * It arrives on an event, is stored in `notifications.params`, and goes out in a mail body. The
+   * three ways it could escape are the two read routes and the dead-letter view — `GET
+   * /notifications` returns the whole `params` object, and an operator with the admin role may read
+   * any user's notifications (`server.ts`, the `isAdmin(principal) && requested` line). An operator
+   * who can read a verification link can take the account.
+   */
+  test('the verification link never leaves by an HTTP route, only by mail', async () => {
+    const rig = testRig(sql)
+    await ingestEvent(
+      rig.deps,
+      verification({ userId: ALICE, handle: 'alice', email: 'alice@example.test', verifyUrl: VERIFY_LINK }),
+    )
+
+    const page = await listNotifications(sql, ALICE, { limit: 10, cursor: null, unreadOnly: false })
+    assert.equal(page.notifications.length, 1)
+    const params = page.notifications[0]?.params ?? {}
+    assert.equal(
+      JSON.stringify(page).includes('this-is-not-a-real-token'),
+      false,
+      'the verification link is readable over HTTP',
+    )
+    assert.equal(params['verifyUrl'], '[redacted]', 'redacted visibly, not dropped as if never sent')
+    assert.equal(params['handle'], 'alice', 'and the parameters that are not credentials survive')
+
+    // The mail still carries it: the redaction is at the HTTP boundary, not in the stored row.
+    await dispatchDue(rig.deps, 50)
+    assert.equal(rig.adapters.email.sent[0]?.message.link, VERIFY_LINK)
+  })
+
+  /**
+   * A developer webhook is a third party's URL, and this notification's link is a bearer token.
+   *
+   * `deliveriesFor` writes one delivery per target, so a user holding a webhook endpoint would have
+   * had the verification link HMAC-signed and POSTed to it. The template says which channels it may
+   * be delivered on, and this is the assertion that the restriction is applied rather than declared.
+   */
+  test('a notification carrying a single-use link is never sent to a developer webhook', async () => {
+    const rig = testRig(sql)
+    await upsertTarget(sql, {
+      userId: ALICE,
+      channel: 'webhook',
+      address: 'https://developer.example.test/hooks/cf',
+      secret: WEBHOOK_SECRET,
+    })
+
+    await ingestEvent(
+      rig.deps,
+      verification({ userId: ALICE, handle: 'alice', email: 'alice@example.test', verifyUrl: VERIFY_LINK }),
+    )
+    await dispatchDue(rig.deps, 50)
+
+    assert.equal(rig.adapters.webhook.sent.length, 0, 'a single-use link was posted to a third party')
+    assert.equal(rig.adapters.email.sent.length, 1)
+    const rows = await sql<Array<{ channel: string }>>`select channel from deliveries order by channel`
+    assert.deepEqual(rows.map((row) => row.channel), ['email', 'in_app'])
+  })
+
+  /**
+   * A digest preference must not swallow a single-use link.
+   *
+   * The trap is that every guard already in place stays quiet. `deliverOn` picks the right channel,
+   * the address is on file so `reportUnaddressed` says nothing, the notification is written, the
+   * routing is legal and the user gets a summary at nine the next morning. But `deliveriesFor` only
+   * writes a delivery for an `instant` route, and `describe()` renders a batched item's SUBJECT —
+   * 'Confirm your email address', which has no placeholders — so the link is never rendered
+   * anywhere, and it is redacted out of `GET /notifications`. The account simply cannot be verified,
+   * and nothing in the service reports a problem.
+   */
+  test('a single-use link is delivered now, whatever cadence the reader asked for', async () => {
+    const rig = testRig(sql)
+    await upsertPreferences(sql, ALICE, [
+      { category: 'account', channel: 'email', enabled: true, digest: 'daily', minPriority: 'low' },
+    ])
+
+    await ingestEvent(
+      rig.deps,
+      verification({ userId: ALICE, handle: 'alice', email: 'alice@example.test', verifyUrl: VERIFY_LINK }),
+    )
+
+    const batched = await sql<Array<{ n: number }>>`select count(*)::int as n from digests`
+    assert.equal(batched[0]?.n, 0, 'a link that expires was put in a batch that fires tomorrow')
+
+    await dispatchDue(rig.deps, 50)
+    assert.equal(rig.adapters.email.sent[0]?.message.link, VERIFY_LINK)
+  })
+
+  /**
+   * The address is stored against the user the PAYLOAD names, and never against the actor.
+   *
+   * `forUser` falls back to the envelope actor when the payload names nobody, which is right for
+   * deciding who to tell and wrong for deciding whose address this is: a resend triggered by
+   * somebody other than the account holder would durably re-point that person's email at an inbox
+   * they do not own — including, from then on, every `critical` security alert about their money.
+   * Notifying the wrong person once is a bad notification; storing the wrong address is a bad
+   * notification for ever.
+   */
+  test('an address is kept only for the user the payload names, never for the actor', async () => {
+    const rig = testRig(sql)
+
+    const outcome = await ingestEvent(
+      rig.deps,
+      unregisteredEvent(
+        'identity.email.verification_requested',
+        BOB,
+        // No userId, and BOB on the actor — the shape a resend from another principal would take.
+        { handle: 'alice', email: 'alice@example.test', verifyUrl: VERIFY_LINK },
+        { actor: `user:${BOB}` },
+      ),
+    )
+    assert.equal(outcome.kind, 'processed')
+
+    const rows = await sql<Array<{ n: number }>>`select count(*)::int as n from channel_targets`
+    assert.equal(rows[0]?.n, 0, "somebody else's address was written onto this user")
+  })
+
+  /**
+   * A rule that says it learns an address, given a payload with none.
+   *
+   * This is the producer-side regression: identity stops sending `email`, or a relay drops it. The
+   * notification must still be written — the user can still see it in-app — but the absence has to
+   * be countable, because otherwise it presents exactly as the defect this whole section repairs.
+   */
+  test('an event that should have carried an address and did not is counted, not swallowed', async () => {
+    const rig = testRig(sql, { emailConfigured: true })
+
+    const outcome = await ingestEvent(
+      rig.deps,
+      verification({ userId: ALICE, handle: 'alice', verifyUrl: VERIFY_LINK }),
+    )
+    assert.equal(outcome.kind, 'processed')
+
+    const targets = await sql<Array<{ n: number }>>`
+      select count(*)::int as n from channel_targets where user_id = ${ALICE}
+    `
+    assert.equal(targets[0]?.n, 0, 'no address was carried, so none was invented')
+    assert.equal(
+      counterValue(rig.metrics, 'notify_failed_total', { channel: 'email', reason: 'no_address' }),
+      1,
+    )
+  })
 })

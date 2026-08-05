@@ -128,8 +128,32 @@ import { MAPPED_TOPICS, hasRule, unmappedRegistryTopics } from './catalogue.ts'
 export interface ProposedTopic {
   /** Why notify holds a rule for a topic the estate has not named. Read by a human. */
   readonly reason: string
-  /** The emit site that proves a producer really sends it. `<repo>/src/<file>.ts:<line>`. */
-  readonly emittedAt: string
+  /**
+   * The emit site that proves a producer really sends it. `<repo>/src/<file>.ts:<line>`.
+   *
+   * **Null is a new and strictly worse state, and it is here because the alternative was a lie.**
+   * Every entry this table has ever held was a rule ahead of the REGISTRY, with a producer already
+   * emitting it — so proof of the producer was always available and always required. A rule ahead of
+   * its PRODUCER had no representation at all, which left an author facing one exactly two options:
+   * cite a line number that does not carry the emit, or not write the rule. The first is the fault
+   * this file's own header warns about at length ("a citation that has drifted to a plausible
+   * neighbour is worse than none, because it reads as verified"), and `malformedProposals` checks
+   * the SHAPE of this string and could never have caught it. The second is how a service ends up
+   * shipping a fortnight after the producer.
+   *
+   * So the state is representable, and it costs something to be in: `awaitingProducer` must name the
+   * repository and the change, and `unprovenProposals()` lists every entry in it for
+   * `topics.test.ts` to pin as an exact set — so a second one is an edit somebody has to make and
+   * argue for, rather than an accumulation.
+   */
+  readonly emittedAt: string | null
+  /**
+   * Who is writing the producer, and what they are writing. Required when `emittedAt` is null.
+   *
+   * `repo` is `micro-<name>`, the same spelling `UNPRODUCED_NOTIFICATIONS.owner` uses, so the two
+   * tables name repositories the same way and one grep finds both.
+   */
+  readonly awaitingProducer?: { readonly repo: string; readonly change: string }
   /** The entry to add to `TOPICS` in `@cloudsforge/contracts-events`, verbatim. */
   readonly spec: TopicSpec
 }
@@ -175,7 +199,42 @@ export interface ProposedTopic {
  * contracts for one topic. That held: contracts' own commit says the description it registered is
  * "character for character theirs".
  */
-export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({})
+export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({
+  /**
+   * The first entry that is ahead of its PRODUCER and not merely ahead of the registry, and the
+   * reason `emittedAt` learned to be null. See that field for the argument.
+   *
+   * It is here because the rule closes a defect that has been live since this service was written:
+   * `catalogue.ts`'s `LearnedAddress` has the full account, but the short version is that no user in
+   * this estate has ever had an email address in `channel_targets`, so every email notification ever
+   * produced went to nobody, with no delivery row to show for it. The address arrives on this event
+   * and on no other — identity's registration payload carries none — so the rule and the producer
+   * have to land together, and this table is where that is visible rather than assumed.
+   *
+   * The spec is proposed rather than copied, which is the one way this entry is weaker than the ones
+   * before it: there is no producer-side quarantine to paste from yet. `keyedBy` is `user_id` to
+   * match `identity.user.registered`, which is the only sensible partition for a per-account fact
+   * and the one identity already uses for it.
+   */
+  'identity.email.verification_requested': Object.freeze({
+    reason:
+      'The event that carries a new account holder\'s email address to this service. Nothing else does: identity\'s registration payload is { userId, handle, organisationId, organisationSlug } and holds no address, so without this topic notify has no address for anybody and every email notification it produces reaches nobody. The rule reads userId, handle, email and verifyUrl, keeps the address as an unverified email target, and mails the link to it.',
+    emittedAt: null,
+    awaitingProducer: {
+      repo: 'micro-identity',
+      change:
+        'Email verification: a token minted at registration and on request, emitted as identity.email.verification_requested with { userId, handle, email, verifyUrl }. In progress at the time this rule was written; the emit site replaces `emittedAt: null` when it lands.',
+    },
+    spec: Object.freeze({
+      producer: 'identity',
+      payloadType: 'EmailVerificationRequested',
+      version: '1.0',
+      keyedBy: 'user_id',
+      description:
+        'A single-use link has been minted for an unverified email address. Carries the address, so it is the only event from which a consumer can learn where to reach a new account holder.',
+    }),
+  }),
+})
 
 /**
  * An AD-08 notification this service cannot produce, and the ONE reason why.
@@ -366,20 +425,57 @@ export function adoptedProposals(): readonly string[] {
   return Object.keys(AWAITING_REGISTRATION).filter(isRegisteredTopic).sort()
 }
 
-/** A proposal must describe a topic that could actually be registered, and prove its producer. */
+/**
+ * A proposal must describe a topic that could actually be registered, and account for its producer.
+ *
+ * "Account for" rather than "prove", now that `emittedAt` may be null: an entry either cites the
+ * emit site or names the repository writing it and what is being written. What is refused in both
+ * cases is the same — a proposal that says nothing checkable about who sends the event.
+ */
 export function malformedProposals(): readonly string[] {
   return Object.keys(AWAITING_REGISTRATION)
     .filter((topic) => {
       const proposed = AWAITING_REGISTRATION[topic]
       if (!proposed) return true
+      const producer =
+        proposed.emittedAt === null
+          ? // No emit site, so the cost is naming who is writing one. The change description is
+            // held to the same length as an evidence string in UNPRODUCED_NOTIFICATIONS: under
+            // that, it is a label rather than something a reader could act on.
+            !/^micro-[a-z-]+$/.test(proposed.awaitingProducer?.repo ?? '') ||
+            (proposed.awaitingProducer?.change.length ?? 0) < 80
+          : !/^[a-z-]+\/src\/[\w.-]+\.ts:\d+$/.test(proposed.emittedAt) ||
+            proposed.awaitingProducer !== undefined
       return (
         !isValidTopicName(topic) ||
         !topic.startsWith(`${proposed.spec.producer.replace(/-/g, '_')}.`) ||
         proposed.spec.keyedBy === '' ||
-        !/^[a-z-]+\/src\/[\w.-]+\.ts:\d+$/.test(proposed.emittedAt) ||
+        producer ||
         proposed.reason.length < 80
       )
     })
+    .sort()
+}
+
+/**
+ * Proposals whose producer is not written yet.
+ *
+ * Strictly worse than an ordinary quarantine entry, and separated from them so it reads that way: a
+ * rule ahead of the registry cannot fire until contracts moves, a rule ahead of its producer cannot
+ * fire until somebody writes the emit — and the fifteen rules this file was built to delete were
+ * every one of them in the second state without anybody being able to see it.
+ *
+ * **This checkout cannot prove the emit exists**, and no check here should pretend otherwise; the
+ * same argument `contradictedGaps` makes about the half of its question that lives in `micro-org`.
+ * What it can do is force the set to be declared: `topics.test.ts` pins it as an EXACT list, so a
+ * second entry is an edit somebody has to make and defend, and landing a producer means replacing
+ * `emittedAt: null` with the line — which is the edit that removes the topic from here. The registry
+ * ratchet is unchanged and still the thing that eventually empties the table: `adoptedProposals()`
+ * turns the suite red the moment contracts registers it and the whole entry has to go.
+ */
+export function unprovenProposals(): readonly string[] {
+  return Object.keys(AWAITING_REGISTRATION)
+    .filter((topic) => AWAITING_REGISTRATION[topic]?.emittedAt === null)
     .sort()
 }
 

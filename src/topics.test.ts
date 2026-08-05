@@ -22,6 +22,7 @@ import {
   inconsistentGaps,
   malformedProposals,
   unmappedTopics,
+  unprovenProposals,
   unregisteredRuleTopics,
 } from './topics.ts'
 import { unregisteredEvent, ALICE } from './testsupport.ts'
@@ -63,6 +64,48 @@ test('every pending proposal carries a spec that could be pasted into the regist
     [],
     'a proposal needs a valid topic name under its producer, a real ordering key, the emit site that proves the producer sends it, and a reason worth reading',
   )
+})
+
+/**
+ * The entries that are ahead of their PRODUCER, not merely ahead of the registry.
+ *
+ * Strictly the worse of the two states and, until this list existed, the one with no representation
+ * at all — which left an author holding a rule whose producer was being written that week with a
+ * choice between citing a line number that carries no emit and not writing the rule. The first is
+ * the fault `topics.ts`'s own header spends a paragraph on; `malformedProposals` checks the SHAPE of
+ * `emittedAt` and would have passed a plausible lie without blinking.
+ *
+ * The set is EXACT for the same reason `UNPRODUCED_NOTIFICATIONS` is: a floor gets ratcheted by
+ * whoever is adding to it, and this is a state that must cost an edit and an argument. Landing the
+ * producer means replacing `emittedAt: null` with the emit site, which is the edit that empties this
+ * list; contracts registering the topic fires `adoptedProposals()` and deletes the whole entry.
+ *
+ * **No check here can prove the emit exists** — this checkout holds the consumer half of the bus and
+ * nothing else, the same limit `contradictedGaps()` states about its own question. What is asserted
+ * is what this repository can answer: the state is declared, it is the only one, and it carries the
+ * repository and the change that closes it.
+ */
+test('a rule ahead of its producer says so, and names who is writing the producer', () => {
+  assert.deepEqual(
+    unprovenProposals(),
+    ['identity.email.verification_requested'],
+    'a proposal with no emit site was added or landed — cite the emit, or say why a second is owed',
+  )
+  for (const topic of unprovenProposals()) {
+    const proposed = AWAITING_REGISTRATION[topic]
+    assert.equal(proposed?.emittedAt, null)
+    assert.match(proposed?.awaitingProducer?.repo ?? '', /^micro-[a-z-]+$/, `${topic}: name the repository`)
+    assert.ok(
+      (proposed?.awaitingProducer?.change.length ?? 0) > 80,
+      `${topic}: say what is being written, not that something is`,
+    )
+    // The rule exists — the quarantine explains a rule, and an entry with none explains nothing —
+    // and the topic is accepted at /ingest, so the event is handled the day it starts arriving
+    // rather than 400ing until somebody notices.
+    assert.equal(hasRule(topic), true, `${topic} is quarantined with no rule`)
+    assert.equal(isKnownTopic(topic), true, `${topic} would be refused at /ingest`)
+    assert.equal(isRegisteredTopic(topic), false, `${topic} is registered — this entry should be gone`)
+  }
 })
 
 /**

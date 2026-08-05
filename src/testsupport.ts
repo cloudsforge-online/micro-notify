@@ -174,6 +174,12 @@ export function testRig(
     readonly maxAttempts?: number
     readonly backoffMs?: number
     readonly override?: Partial<Record<Channel, ChannelAdapter>>
+    /**
+     * Defaults to true, because the rig registers a working email adapter and a fixture should not
+     * quietly describe a deployment nobody runs. A test that wants the SMTP-less mode — a supported
+     * one, and the one in which a missing address must NOT be counted — says so.
+     */
+    readonly emailConfigured?: boolean
   } = {},
 ): TestRig {
   const recorders: Record<Channel, RecordingAdapter> = {
@@ -202,6 +208,7 @@ export function testRig(
       publicUrl: 'https://app.cloudsforge.test',
       maxAttempts: options.maxAttempts ?? 6,
       instanceId: 'test-runner',
+      emailConfigured: options.emailConfigured ?? true,
       backoff: () => backoffMs,
       leaseMs: 5_000,
       ...(options.now ? { now: options.now } : {}),
