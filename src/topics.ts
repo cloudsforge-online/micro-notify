@@ -199,42 +199,28 @@ export interface ProposedTopic {
  * contracts for one topic. That held: contracts' own commit says the description it registered is
  * "character for character theirs".
  */
-export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({
-  /**
-   * The first entry that is ahead of its PRODUCER and not merely ahead of the registry, and the
-   * reason `emittedAt` learned to be null. See that field for the argument.
-   *
-   * It is here because the rule closes a defect that has been live since this service was written:
-   * `catalogue.ts`'s `LearnedAddress` has the full account, but the short version is that no user in
-   * this estate has ever had an email address in `channel_targets`, so every email notification ever
-   * produced went to nobody, with no delivery row to show for it. The address arrives on this event
-   * and on no other — identity's registration payload carries none — so the rule and the producer
-   * have to land together, and this table is where that is visible rather than assumed.
-   *
-   * The spec is proposed rather than copied, which is the one way this entry is weaker than the ones
-   * before it: there is no producer-side quarantine to paste from yet. `keyedBy` is `user_id` to
-   * match `identity.user.registered`, which is the only sensible partition for a per-account fact
-   * and the one identity already uses for it.
-   */
-  'identity.email.verification_requested': Object.freeze({
-    reason:
-      'The event that carries a new account holder\'s email address to this service. Nothing else does: identity\'s registration payload is { userId, handle, organisationId, organisationSlug } and holds no address, so without this topic notify has no address for anybody and every email notification it produces reaches nobody. The rule reads userId, handle, email and verifyUrl, keeps the address as an unverified email target, and mails the link to it.',
-    emittedAt: null,
-    awaitingProducer: {
-      repo: 'micro-identity',
-      change:
-        'Email verification: a token minted at registration and on request, emitted as identity.email.verification_requested with { userId, handle, email, verifyUrl }. In progress at the time this rule was written; the emit site replaces `emittedAt: null` when it lands.',
-    },
-    spec: Object.freeze({
-      producer: 'identity',
-      payloadType: 'EmailVerificationRequested',
-      version: '1.0',
-      keyedBy: 'user_id',
-      description:
-        'A single-use link has been minted for an unverified email address. Carries the address, so it is the only event from which a consumer can learn where to reach a new account holder.',
-    }),
-  }),
-})
+/*
+ * EMPTY, and `identity.email.verification_requested` is why it is empty TODAY.
+ *
+ * That entry was the first one here that was ahead of its PRODUCER rather than merely ahead of the
+ * registry. Both have now landed: `micro-identity` 1.1.0 emits it
+ * (`identity/src/emailVerification.ts:167`) and `micro-contracts` registers it
+ * (`contracts/packages/events/src/index.ts`, from identity's verbatim spec).
+ *
+ * ── WHAT THE GAP BETWEEN THE THREE LANDINGS COST, LIVE ────────────────────────────────────────
+ *
+ * identity shipped to production before contracts did. For that window every registration on both
+ * estates produced an event this service answered with 400 —
+ *
+ *     topic: "identity.email.verification_requested" is not in this registry;
+ *     contracts-events may be behind
+ *
+ * — so the mail was never rendered, and sign-in refused the account with `email_unverified`.
+ * Registration returned "check your email" and no email could ever arrive. This table existing is
+ * what made that diagnosable in one grep; what it could not do is stop a producer being deployed
+ * ahead of the contract, because deployment order is not a property of a checkout.
+ */
+export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({})
 
 /**
  * An AD-08 notification this service cannot produce, and the ONE reason why.

@@ -86,9 +86,19 @@ test('every pending proposal carries a spec that could be pasted into the regist
  * repository and the change that closes it.
  */
 test('a rule ahead of its producer says so, and names who is writing the producer', () => {
+  /*
+   * EMPTY, and it got there the way the ratchet above says it should: the producer landed and then
+   * the registry did. `identity.email.verification_requested` was the only entry this list has ever
+   * held — `micro-identity` 1.1.0 emits it at `identity/src/emailVerification.ts:167`, and
+   * `micro-contracts` has registered it, which fires `adoptedProposals()` and deletes the entry.
+   *
+   * The list stays EXACT rather than becoming a floor for the reason the header gives: a state that
+   * must cost an edit and an argument. Adding an entry here must fail this line and make somebody
+   * write down which producer is being changed and by whom.
+   */
   assert.deepEqual(
     unprovenProposals(),
-    ['identity.email.verification_requested'],
+    [],
     'a proposal with no emit site was added or landed — cite the emit, or say why a second is owed',
   )
   for (const topic of unprovenProposals()) {
