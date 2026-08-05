@@ -757,11 +757,16 @@ test('an absent, string or numeric refundable reads as HELD — the only safe di
 })
 
 test('a late withdrawal and a failed one are two notifications, not one deduped into silence', () => {
-  // settlement.withdrawal.stuck keys `withdrawal.failed:<id>`. If this rule reused that key, a
+  // settlement.withdrawal.stuck keys `withdrawal.stuck:<id>`. If this rule reused that key, a
   // withdrawal that went late and then failed would collapse into the "it is late" notification
   // and the user would never hear how it ended. The disposition is in the key for that reason,
   // and because a held failure later corrected to a refunded one must not dedupe into the thing
   // it corrects.
+  //
+  // The stuck key was `withdrawal.failed:<id>` until #221: the topic rendered the failure
+  // template, so its key inherited the failure's name for a withdrawal that had not failed. The
+  // three keys were already distinct, so this test stayed green through the whole defect — it
+  // pins that the dispositions differ, not that any of them is named truthfully.
   const stuck = registeredEvent('settlement.withdrawal.stuck', 'ethereum:mainnet', {
     withdrawalId: WITHDRAWAL,
     userId: ALICE,
@@ -779,7 +784,7 @@ test('a late withdrawal and a failed one are two notifications, not one deduped 
   })
   assert.equal(new Set(keys).size, 3, `three facts, three keys: ${keys.join(', ')}`)
   assert.deepEqual(keys, [
-    `withdrawal.failed:${WITHDRAWAL}`,
+    `withdrawal.stuck:${WITHDRAWAL}`,
     `withdrawal.failed_held:${WITHDRAWAL}`,
     `withdrawal.failed_refunded:${WITHDRAWAL}`,
   ])
@@ -792,6 +797,142 @@ test('a late withdrawal and a failed one are two notifications, not one deduped 
   assert.equal(set?.kind, 'recipients')
   if (set?.kind !== 'recipients') return
   assert.equal(set.recipients[0].dedupeKey, keys[1])
+})
+
+/* --------------------------------------------------------------------------------------------
+ * #221 — a stuck withdrawal must never tell the user their balance is untouched.
+ *
+ * The reservation posts `available → reserved` when the withdrawal is REQUESTED, and reaching
+ * `stuck` returns none of it: settlement's `markStuck` is "never a refund"
+ * (`settlement/src/worker.ts:524`) and wallet's twin sweep "does not refund anything — the payment
+ * may have landed" (`wallet/src/withdrawals.ts:656`). So while this mail is being read, the money
+ * is reserved and unspendable — and the mail said "Nothing has left your balance. You can try
+ * again."
+ *
+ * These tests drive the real rule and render the real template. They assert on the FACT the words
+ * convey, not that a message renders: a build that reinstates the reassurance, or invites a retry
+ * against a balance that is still holding the first reservation, goes red here.
+ * -------------------------------------------------------------------------------------------- */
+
+/** Settlement's payload, as `stuckEvents` really builds it (`settlement/src/withdrawals.ts:687`). */
+function stuckWithdrawal(broadcastAt: string | null): Record<string, unknown> {
+  return {
+    outboundId: '44444444-4444-4444-8444-444444444444',
+    purpose: 'withdrawal',
+    chain: 'litecoin',
+    network: 'mainnet',
+    assetCode: 'LTC',
+    from: 'ltc1qplatform',
+    to: 'ltc1quser',
+    // SMALLEST UNITS. Litecoin is 8 decimals, so this is 1.5 LTC — and it is the shape #199 is
+    // about: rendered as money it reads as a hundred and fifty million.
+    amount: '150000000',
+    fee: '1000',
+    txHash: broadcastAt === null ? null : `0x${'ab'.repeat(32)}`,
+    withdrawalId: WITHDRAWAL,
+    userId: ALICE,
+    reason: 'this payment has not been seen on chain since it was broadcast',
+    signedNonce: '7',
+    broadcastAt,
+    adjudicateWith: 'POST /v1/outbound/44444444-4444-4444-8444-444444444444/adjudicate',
+  }
+}
+
+/** Drive topic → rule → outcome → template, exactly as the pipeline does. */
+function stuckMail(broadcastAt: string | null): { subject: string; body: string; templateId: string } {
+  const event = registeredEvent('settlement.withdrawal.stuck', 'litecoin:mainnet', stuckWithdrawal(broadcastAt), {
+    actor: 'service:settlement',
+    occurredAt: '2026-08-06T09:30:00.000Z',
+  })
+  const rule = RULES[event.topic]
+  assert.ok(rule, 'a stuck withdrawal must reach the user')
+  const set = rule.recipients(event)
+  assert.equal(set.kind, 'recipients')
+  if (set.kind !== 'recipients') return { subject: '', body: '', templateId: '' }
+  const outcome = outcomeOf(rule, event)
+  assert.ok(isTemplateId(outcome.templateId))
+  if (!isTemplateId(outcome.templateId)) return { subject: '', body: '', templateId: '' }
+  const rendered = renderTemplate(
+    templateFor(outcome.templateId),
+    set.recipients[0].params,
+    DEFAULT_LOCALE,
+    'https://app.cloudsforge.test',
+  )
+  assert.deepEqual(rendered.missing, [], 'a gap in a message about held money')
+  return { subject: rendered.subject, body: rendered.body, templateId: outcome.templateId }
+}
+
+test('a stuck withdrawal is never told the balance is untouched, in either state it can be in', () => {
+  for (const broadcastAt of [null, '2026-08-06T09:00:00.000Z']) {
+    const { subject, body } = stuckMail(broadcastAt)
+    const text = `${subject}\n${body}`
+    const where = broadcastAt === null ? 'not broadcast' : 'broadcast'
+
+    // The defect, verbatim and in the family it belongs to. The funds ARE reserved as this is read.
+    assert.doesNotMatch(text, /nothing has left your balance/i, `${where}: the #221 sentence is back`)
+    assert.doesNotMatch(text, /nothing has (left|gone|moved)/i, `${where}: claims the money did not move`)
+    assert.doesNotMatch(text, /your balance is unaffected|balance (is|was) untouched/i, `${where}: false reassurance`)
+    // A refund has NOT happened — `markStuck` never issues one.
+    assert.doesNotMatch(text, /returned to your balance|refunded|coming back/i, `${where}: promises a refund`)
+    // A retry takes a SECOND reservation out of what the first one left.
+    assert.doesNotMatch(text, /you can (try|request) (it )?again|please try again/i, `${where}: invites a retry`)
+
+    // And it states the true fact, in the two words the balance itself uses.
+    assert.match(text, /\bheld\b/i, `${where}: must say the amount is held`)
+    assert.match(text, /\breserved\b/i, `${where}: must name the money as reserved, not available`)
+    assert.match(text, /do not request it again/i, `${where}: must say not to retry`)
+    // Requirement 3: what happens next, and the handle to quote.
+    assert.match(text, /tracked|looking at it/i, `${where}: must say what happens next`)
+    assert.ok(text.includes(WITHDRAWAL), `${where}: must carry the withdrawal id for support`)
+  }
+})
+
+test('a stuck withdrawal tells the truth about the network, and only what broadcastAt proves', () => {
+  // The two states are different facts and the payload can tell them apart, so the user gets the
+  // one that is true rather than a sentence stretched over both.
+  const unsent = stuckMail(null)
+  const sent = stuckMail('2026-08-06T09:00:00.000Z')
+  assert.equal(unsent.templateId, 'withdrawal.stuck')
+  assert.equal(sent.templateId, 'withdrawal.stuck_sent')
+  assert.notEqual(unsent.subject, sent.subject, 'two states, two messages')
+
+  // Without evidence of a broadcast, the mail must not claim a transaction is out there.
+  assert.match(unsent.body, /cannot yet confirm whether the payment reached the network/i)
+  assert.doesNotMatch(unsent.body, /was sent to the network/i, 'asserts a broadcast it cannot know about')
+  // With it, it may say so — and must still not promise the outcome.
+  assert.match(sent.body, /was sent to the network/i)
+  assert.match(sent.body, /may still confirm/i)
+  assert.doesNotMatch(sent.body, /will (confirm|complete|arrive)\b/i, 'promises an outcome nobody knows')
+
+  // An empty string is not a timestamp. `BigInt('') === 0n` is this codebase's recurring defect,
+  // and the stringly form of it would silently promote every unsent withdrawal to "sent".
+  assert.equal(stuckMail('').templateId, 'withdrawal.stuck')
+})
+
+test('a stuck withdrawal never renders smallest units as money — #199 on a live money path', () => {
+  // The payload's `amount` is 150000000 for 1.5 LTC, and notify has no decimals for any asset:
+  // no contracts-chain dependency, no divisor, no formatter. The old `withdrawal.failed` template
+  // took `amount` straight off this payload, so the mail read "A withdrawal of 150000000 LTC".
+  for (const broadcastAt of [null, '2026-08-06T09:00:00.000Z']) {
+    const { subject, body } = stuckMail(broadcastAt)
+    const text = `${subject}\n${body}`
+    assert.doesNotMatch(text, /150000000/, 'a smallest-unit integer rendered as an amount of money')
+    // Nothing that reads as a quantity of the asset at all, since none can be computed correctly.
+    assert.doesNotMatch(text, /\d[\d,.]*\s*LTC\b/i, 'an amount of LTC notify cannot possibly know')
+  }
+})
+
+test('the sentence #221 is about is gone from the service, not just unreferenced', () => {
+  // `withdrawal.failed` had exactly ONE consumer — this stuck rule — so it was never the shared
+  // template it looked like, and leaving it would leave the wording one `templateId:` away from
+  // being live again on a money topic.
+  assert.equal(isTemplateId('withdrawal.failed'), false, 'the deleted template is back')
+  const source = readFileSync(new URL('./templates.ts', import.meta.url), 'utf8')
+  const live = source
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('*') && !line.trimStart().startsWith('//'))
+    .join('\n')
+  assert.doesNotMatch(live, /Nothing has left your balance/, 'the false sentence is renderable again')
 })
 
 /* ==================================================================================================

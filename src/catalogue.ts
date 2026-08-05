@@ -263,6 +263,30 @@ function withdrawalIdOf(event: InboundEvent): string {
 }
 
 /**
+ * The withdrawal a `settlement.withdrawal.stuck` event is about.
+ *
+ * Separate from `withdrawalIdOf` because the fallback must be different, and getting it wrong is
+ * silent: the registry keys this topic `chain:network`, so `event.key` here is `ethereum:mainnet`
+ * and quoting it to support would name a chain instead of a withdrawal. The envelope's own id is
+ * at least a unique handle on the message.
+ */
+function stuckWithdrawalIdOf(event: InboundEvent): string {
+  return str(event.payload, ['withdrawal_id', 'withdrawalId'], event.id)
+}
+
+/**
+ * Did the bytes reach the network? **Evidence only — absence is not a "no".**
+ *
+ * `settlement/src/withdrawals.ts:702` sends `broadcastAt` as an ISO string or `null`, and a row
+ * reaches `stuck` from either `signed` or `broadcast`. `str` treats an empty string as absent, so
+ * a blank field cannot read as a timestamp — the empty-string trap that keeps producing defects
+ * in this codebase (`BigInt('') === 0n`) in its stringly form.
+ */
+function wasBroadcast(payload: Record<string, unknown>): boolean {
+  return str(payload, ['broadcastAt', 'broadcast_at'], '').length > 0
+}
+
+/**
  * The user this event is about.
  *
  * Falls back to the envelope `key` when — and only when — the registry says that topic is keyed
@@ -866,19 +890,57 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
+  /**
+   * A withdrawal past its deadline. **Late is not failed, and the funds are HELD.**
+   *
+   * This rule rendered `withdrawal.failed` — "Nothing has left your balance. You can try again." —
+   * and both halves were false here. The reservation moves `available → reserved` at request time
+   * and going stuck returns none of it: `markStuck` is "never a refund"
+   * (`settlement/src/worker.ts:524`), and wallet's twin sweep "does not refund anything — the
+   * payment may have landed" (`wallet/src/withdrawals.ts:656`). So the one sentence the mail
+   * existed to reassure with told a user their money was untouched while it was reserved and
+   * unspendable, and the retry it invited would have taken a second reservation out of what was
+   * left. See `withdrawal.stuck` in `templates.ts` for the rest of the reasoning.
+   *
+   * ## The variant is earned, not assumed
+   *
+   * `stuck` is reached from `signed` or `broadcast`, so "is there a transaction on the network"
+   * has two answers and the payload's `broadcastAt` is the only evidence either way. The rule's
+   * own template is the one that claims nothing; the variant fires only where `broadcastAt` is a
+   * non-empty string. An absent field is not proof of a state, so it gets the reading that holds
+   * for both.
+   *
+   * ## The dedupe key names the disposition
+   *
+   * It was `withdrawal.failed:<id>`, which collided in meaning with the rule below that genuinely
+   * reports a failure — the same "name the disposition" argument that rule's own comment makes.
+   * The two stuck halves key separately on purpose: a withdrawal that goes stuck unsent and is
+   * then broadcast has changed news, and the second message must not dedupe into the first.
+   *
+   * `event.id` is the fallback for the withdrawal id and NOT `event.key`, because the registry
+   * keys this topic `chain:network`. `withdrawalIdOf` is safe only for `settlement.outbound.*`.
+   */
   'settlement.withdrawal.stuck': Object.freeze({
     category: 'withdrawal',
+    // The default: we do not know that anything reached the network. See the variant.
     priority: 'high',
-    templateId: 'withdrawal.failed',
-    why: 'An outbound transaction past its deadline. Silence here is a user who believes their money has vanished.',
+    templateId: 'withdrawal.stuck',
+    why: 'An outbound transaction past its deadline, with the amount reserved and unspendable meanwhile. Silence here is a user who believes their money has vanished; the old wording was worse, telling them it had never moved.',
+    variant: Object.freeze({
+      when: (event) => wasBroadcast(event.payload),
+      priority: 'high',
+      templateId: 'withdrawal.stuck_sent',
+      why: 'A `broadcastAt` is evidence the bytes reached the network, so this half can say the transaction exists and may still confirm on its own — which the default must not claim without it.',
+    } satisfies Variant),
     recipients: forUser(
-      (event) => `withdrawal.failed:${str(event.payload, ['withdrawal_id', 'withdrawalId'], event.id)}`,
+      (event) =>
+        `${wasBroadcast(event.payload) ? 'withdrawal.stuck_sent' : 'withdrawal.stuck'}:${stuckWithdrawalIdOf(event)}`,
       (event) => ({
-        amount: str(event.payload, ['amount'], 'a withdrawal'),
-        asset: str(event.payload, ['asset_code', 'assetCode', 'asset'], ''),
-        reason: str(event.payload, ['reason'], 'it has not confirmed within the expected time and is being retried'),
+        withdrawalId: stuckWithdrawalIdOf(event),
+        reason: str(event.payload, ['reason'], 'it has not confirmed within the expected time'),
+        at: formatInstant(event.occurredAt),
       }),
-      (event) => `cf:settlement:withdrawal:${str(event.payload, ['withdrawal_id', 'withdrawalId'], event.id)}`,
+      (event) => `cf:settlement:withdrawal:${stuckWithdrawalIdOf(event)}`,
     ),
   }),
 
@@ -1693,7 +1755,7 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
   'wallet.withdrawal.refunded':
     'Already sent, by the service that knows WHY. settlement.outbound.failed carries `refundable` and its rule renders withdrawal.failed_refunded — "the amount is coming back" — from the same withdrawal id. wallet emits this when the reservation actually returns to the balance, which is the same withdrawal reaching the same user seconds later. A rule here is a second mail about one refund, and the dedupe key cannot save it because the two rules would have to agree on a key across two producers by accident. If the landing moment is judged worth its own message it belongs as a VARIANT of the settlement rule, not as a rule here.',
   'wallet.withdrawal.stuck':
-    'Already sent, by settlement.withdrawal.stuck, whose rule is above and renders withdrawal.failed off the same withdrawal id. Two services detect one stuck withdrawal from either end — wallet because settlement has said nothing before the deadline (wallet/src/withdrawals.ts:684), settlement because its own outbound has not confirmed — and one stuck withdrawal is one fact to the person waiting for the money. Note the settlement rule renders "Nothing has left your balance", which is wrong for a withdrawal whose funds are still RESERVED; that is a defect in the existing rule to fix there rather than a reason to add a second mail here.',
+    'Already sent, by settlement.withdrawal.stuck, whose rule is above and now renders withdrawal.stuck (or withdrawal.stuck_sent) off the same withdrawal id. Two services detect one stuck withdrawal from either end — wallet because settlement has said nothing before the deadline (wallet/src/withdrawals.ts:684), settlement because its own outbound has not confirmed — and one stuck withdrawal is one fact to the person waiting for the money. This entry used to record that the settlement rule rendered "Nothing has left your balance", which was false for a withdrawal whose funds are still RESERVED; that defect is fixed at the rule rather than by adding a second mail here, and both stuck templates now say the amount is held and refuse to invite a retry.',
   // ── aetherholm, the first game in the registry ─────────────────────────────────────────────
   // Phase 2 changed the answer for two topics: battle.resolved and spire.captured now have
   // RULES above — the first game events worth an interruption. The phase-1 five below keep

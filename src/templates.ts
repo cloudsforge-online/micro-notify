@@ -282,16 +282,19 @@ export const TEMPLATES = Object.freeze({
       '{{amount}} {{asset}} was sent to {{destination}}.\n\nTransaction: {{txHash}}',
     ),
   }),
-  'withdrawal.failed': Object.freeze({
-    id: 'withdrawal.failed',
-    category: 'withdrawal',
-    params: ['amount', 'asset', 'reason'],
-    path: '/wallet/activity',
-    text: en(
-      'A transaction could not be completed',
-      'A withdrawal of {{amount}} {{asset}} did not go through: {{reason}}.\n\nNothing has left your balance. You can try again, and support can tell you why if the reason is not clear.',
-    ),
-  }),
+  /*
+   * `withdrawal.failed` STOOD HERE AND IS DELETED, not left for a future caller.
+   *
+   * It said "Nothing has left your balance. You can try again." — and it had exactly one consumer,
+   * `settlement.withdrawal.stuck`, a topic where both sentences were false. It was never the
+   * shared template it looked like. Once that rule moved to the pair below, the reachability test
+   * in `catalogue.test.ts` called it: written, and nothing renders it.
+   *
+   * Leaving it would leave the sentence one `templateId:` away from being live again, which is how
+   * it got onto a money topic in the first place. The two honest failure templates are
+   * `withdrawal.failed_held` and `withdrawal.failed_refunded`, and they exist BECAUSE "your money
+   * is coming back" and "your money is held" cannot share one reassuring sentence.
+   */
   /* ------------------------------------------------------------------
    * The two halves of a failed withdrawal.
    *
@@ -327,6 +330,66 @@ export const TEMPLATES = Object.freeze({
     text: en(
       'Your withdrawal was not sent, and the amount is coming back',
       'A withdrawal from your account was not sent at {{at}}: {{reason}}.\n\nThe payment never left the platform and the amount is being returned to your balance. You can request it again once it shows.\n\nWithdrawal {{withdrawalId}}.',
+    ),
+  }),
+  /* ------------------------------------------------------------------
+   * The two halves of a STUCK withdrawal — late, not failed.
+   *
+   * `settlement.withdrawal.stuck` rendered `withdrawal.failed` until this was split out, and that
+   * template says "Nothing has left your balance. You can try again." Both halves of that sentence
+   * are false for this topic and the second is dangerous:
+   *
+   *   - The reservation posts `available → reserved` when the withdrawal is REQUESTED
+   *     (`wallet/src/withdrawals.ts:551`), so value has already left the available balance. Going
+   *     stuck returns nothing — `markStuck` is "never a refund" (`settlement/src/worker.ts:524`)
+   *     and wallet's own sweep "does not refund anything — the payment may have landed"
+   *     (`wallet/src/withdrawals.ts:656`). The money is held, and the mail said it was untouched.
+   *   - "You can try again" invites a second reservation against the balance the first is still
+   *     holding. `withdrawal.failed_held` above already refuses to say it, for this exact reason.
+   *
+   * ## Why two templates and not one
+   *
+   * Same argument as the failed pair: two facts, not one parameterised sentence. `stuck` is
+   * reached from `signed` or `broadcast` (`settlement/src/worker.ts:526`), and `broadcastAt` on
+   * the payload is the evidence that separates them. The DEFAULT is the reading that holds when
+   * there is no such evidence — we do not know whether anything reached the network — and the
+   * variant has to be EARNED by a `broadcastAt`, which is the direction `Variant` is documented to
+   * run in. Defaulting to "it has been sent" would state a transaction exists on the strength of a
+   * missing field.
+   *
+   * ## Neither carries an amount, and that is deliberate
+   *
+   * The payload's `amount` is SMALLEST UNITS (`settlement/src/withdrawals.ts:518` —
+   * `row.amount.toString()` off a `numeric(78,0)`), and notify has no decimals for any asset: no
+   * `contracts-chain` dependency, no divisor, no formatter. Rendering it raw is the live defect
+   * #199 — 1.5 LTC reads as "150000000" — and the old `withdrawal.failed` mail was doing exactly
+   * that on this topic. The precedent is `tessera.venue.booked`'s `priceWei`, which is on the
+   * payload and deliberately out of the words for the same reason. What would change this: a
+   * pre-formatted amount on the payload, or the denomination exported from `@cloudsforge/contracts-*`.
+   * Not a guess here, and not a factor of 10^10 in a sentence about someone's money.
+   *
+   * Both point the reader at the balance instead, where `GET /v1/portfolio` reports `available`
+   * and `reserved` as separate rows carrying a `purpose` (`wallet/src/portfolio.ts:180-204`), so
+   * the held amount is a number the user can actually see — as reserved, not as spendable.
+   * ------------------------------------------------------------------ */
+  'withdrawal.stuck': Object.freeze({
+    id: 'withdrawal.stuck',
+    category: 'withdrawal',
+    params: ['withdrawalId', 'reason', 'at'],
+    path: '/wallet/activity',
+    text: en(
+      'Your withdrawal is taking longer than expected, and the amount is held',
+      'A withdrawal from your account has not completed within the expected time, as of {{at}}: {{reason}}.\n\nThe amount is held. It left your available balance when you requested it and has not been returned — it shows as reserved rather than available until this ends, so please do not request it again.\n\nWe cannot yet confirm whether the payment reached the network, so we cannot tell you yet how this ends. It is being tracked and someone is already looking at it, and you will be told what happened to the amount either way. Quote withdrawal {{withdrawalId}} if you contact support.',
+    ),
+  }),
+  'withdrawal.stuck_sent': Object.freeze({
+    id: 'withdrawal.stuck_sent',
+    category: 'withdrawal',
+    params: ['withdrawalId', 'reason', 'at'],
+    path: '/wallet/activity',
+    text: en(
+      'Your withdrawal has been sent but has not confirmed, and the amount is held',
+      'A withdrawal from your account was sent to the network but had not confirmed as of {{at}}: {{reason}}.\n\nThe amount is held. It left your available balance when you requested it and has not been returned — it shows as reserved rather than available until this ends, so please do not request it again.\n\nThe transaction may still confirm on its own and is being tracked. If it cannot complete, you will be told what happened to the amount. Quote withdrawal {{withdrawalId}} if you contact support.',
     ),
   }),
   'transfer.posted': Object.freeze({
