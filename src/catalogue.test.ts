@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { existsSync, readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { TOPIC_NAMES, isRegisteredTopic } from '@cloudsforge/contracts-events'
 import {
@@ -1358,3 +1359,108 @@ test('the two tessera topics with no rule are each recorded, and never both mapp
     assert.equal(isRegisteredTopic(topic), true, `${topic} is not in the registry`)
   }
 })
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════
+   THE SEAM, DRIVEN FROM THE PRODUCER'S OWN SOURCE.
+
+   Every test above types the payload keys by hand — `{ userId, handle, email, verifyUrl }` — which
+   means this repository and micro-identity hold two copies of one contract and the suite compares
+   each copy with itself. Rename `verifyUrl` in identity tomorrow and every test in this file still
+   passes, while the mail goes out pointing at `/settings/account` because `verifyLinkOf` fell back.
+   Nothing fails. Nobody is told. That is the exact shape of the defect this whole change exists to
+   close, and it would have come straight back in the test suite written to prove it fixed.
+
+   So the payload below is built from the key names PARSED OUT OF IDENTITY'S EMIT SITE, and the
+   assertions are about what notify then produces. `hub-web/test/wallet-assets.test.ts` sets the
+   precedent in this estate: read the sibling's source, let the producer decide, and fail here when
+   the two disagree.
+   ══════════════════════════════════════════════════════════════════════════════════════════ */
+
+const ESTATE = new URL('../../', import.meta.url)
+const EMIT_SITE = new URL('identity/src/emailVerification.ts', ESTATE)
+const identityPresent = existsSync(EMIT_SITE)
+
+/**
+ * The payload keys identity really emits for this topic.
+ *
+ * Parsed from the `payload: { … }` block of the `identity.email.verification_requested` emit, and
+ * it THROWS rather than returning an empty set if the shape it expects is gone. A parser that
+ * silently matched nothing would make every assertion below vacuously true, which is the failure
+ * mode this whole block exists to avoid — see `wallet-assets.test.ts`, which learned it the same way.
+ */
+function emittedPayloadKeys(source: string): readonly string[] {
+  const emit = /topic:\s*'identity\.email\.verification_requested'[\s\S]*?payload:\s*\{([\s\S]*?)\n\s{6}\}/.exec(source)
+  if (!emit?.[1]) throw new Error('identity’s verification emit is no longer a `payload: { … }` block')
+  // Comments go first. Half the lines in that block are prose, and prose contains colons — the
+  // first version of this matched three keys out of six because the commas it keyed off were
+  // followed by explanations rather than by fields, and the `< 4` guard below is what caught it.
+  const body = emit[1].replace(/\/\/[^\n]*/g, '')
+  const keys = new Set<string>()
+  // `key:` at the head of a line, and the spread form `...(x ? {} : { key })` that carries a field
+  // present only sometimes — `verifyUrl` is exactly that, and missing it would be missing the one
+  // field whose loss is silent.
+  for (const m of body.matchAll(/^\s*([a-zA-Z_]\w*)\s*:/gm)) keys.add(m[1] as string)
+  for (const m of body.matchAll(/\{\s*([a-zA-Z_]\w*)\s*\}/g)) keys.add(m[1] as string)
+  if (keys.size < 4) throw new Error(`parsed only ${keys.size} payload keys; the parser has rotted`)
+  return [...keys]
+}
+
+test(
+  'the rule reads the payload micro-identity actually emits, not a copy of it typed here',
+  {
+    // A REAL skip, reported as skipped. CI checks out this repository alone, and a test that
+    // `return`ed instead would report as passed against work it had not done.
+    skip: identityPresent
+      ? false
+      : 'micro-identity is not checked out beside this repository, so its emit site cannot be read',
+  },
+  () => {
+    const keys = emittedPayloadKeys(readFileSync(EMIT_SITE, 'utf8'))
+
+    // Build the payload from THOSE keys. Every value is placeholder text; the link is obviously
+    // not a credential and is `https:` so it survives the scheme guard.
+    const link = 'https://hub.cloudsforge.test/account/verify#token=not-a-real-token'
+    const values: Readonly<Record<string, unknown>> = {
+      userId: ALICE,
+      handle: 'alice',
+      email: 'alice@example.test',
+      expiresAt: new Date(Date.UTC(2026, 7, 6)).toISOString(),
+      linkable: true,
+      verifyUrl: link,
+    }
+    // A key identity emits that this test does not know how to fill is a contract change nobody
+    // has looked at. Named, rather than skipped past with a default.
+    const unknown = keys.filter((key) => !(key in values))
+    assert.deepEqual(unknown, [], `identity emits ${unknown.join(', ')}, which this seam does not model`)
+
+    const payload = Object.fromEntries(keys.map((key) => [key, values[key]]))
+    const event = unregisteredEvent('identity.email.verification_requested', ALICE, payload, {
+      actor: `user:${ALICE}`,
+    })
+    const rule = RULES['identity.email.verification_requested']
+    assert.ok(rule, 'the topic identity emits has no rule here')
+    if (!rule) return
+
+    // ── The three things that are silently wrong when a field is renamed.
+    assert.equal(
+      rule.learns?.read(event),
+      values['email'],
+      'the address did not come off identity’s payload — every mail would route to nobody',
+    )
+    assert.equal(
+      rule.learns?.subject(event),
+      ALICE,
+      'the address owner did not come off identity’s payload',
+    )
+    const set = rule.recipients(event)
+    assert.equal(set.kind, 'recipients')
+    if (set.kind !== 'recipients') return
+    assert.equal(
+      set.recipients[0]?.params['verifyUrl'],
+      link,
+      'the link did not come off identity’s payload, so the mail would carry the fall-back page ' +
+        'instead — which renders, and reads as a working email, and verifies nothing',
+    )
+    assert.equal(set.recipients[0]?.params['handle'], values['handle'], 'the greeting lost its name')
+  },
+)
