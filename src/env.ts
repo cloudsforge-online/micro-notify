@@ -21,6 +21,8 @@
 
 import { hostname } from 'node:os'
 
+import { assertGeneratedSecretList } from '@cloudsforge/secrets'
+
 /**
  * The service's own name. A constant rather than a variable: it is a property of the repository,
  * not of the deployment, and making it configurable is how two services end up sharing a
@@ -37,39 +39,23 @@ export class EnvError extends Error {
 }
 
 /**
- * Values that must never be accepted. Short on purpose: these are the strings that actually
- * appear in example files, because those are the ones copied into a deployment by someone
- * in a hurry.
+ * The deny-list that used to live here is gone, and it is worth saying why rather than leaving a
+ * gap. It listed eight strings and required 24 characters. Both were cleared by
+ * `estate-only-outbox-secret-` padded with zeros, which ran as a LIVE signing key across 44
+ * containers on both networks: 40 characters, and not the ninth string anyone had thought of.
+ *
+ * A membership test can only refuse placeholders someone already imagined, so it fails in exactly
+ * the case that matters — a new one. And length is not entropy: `'x'.repeat(24)` clears a 24-char
+ * floor and carries almost no key material at all.
+ *
+ * `@cloudsforge/secrets` measures bytes of key material for the alphabet the value is written in,
+ * so it refuses both without needing to have met them before.
  */
-const PLACEHOLDERS = new Set([
-  'changeme',
-  'change-me',
-  'placeholder',
-  'secret',
-  'dev-secret',
-  'dev-outbox-signing-secret',
-  'replace-with-a-real-secret',
-  'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-])
-
 type Source = Readonly<Record<string, string | undefined>>
 
 function required(source: Source, name: string): string {
   const value = source[name]?.trim()
   if (!value) throw new EnvError(`${name} is required — ${SERVICE} refuses to start without it`)
-  return value
-}
-
-function requiredSecret(source: Source, name: string, minLength = 24): string {
-  const value = required(source, name)
-  if (PLACEHOLDERS.has(value.toLowerCase())) {
-    throw new EnvError(`${name} is set to a known placeholder — generate a real secret`)
-  }
-  // Length is a proxy for entropy and the only one available here. It is set above the point at
-  // which a human-chosen string is plausible, so a memorable password fails this check too.
-  if (value.length < minLength) {
-    throw new EnvError(`${name} must be at least ${minLength} characters (got ${value.length})`)
-  }
   return value
 }
 
@@ -190,20 +176,33 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     throw new EnvError(`LOG_LEVEL must be one of debug, info, warn, error (got ${logLevel})`)
   }
 
-  const secrets = requiredSecret(source, 'NOTIFY_INGEST_SIGNING_SECRET')
+  const raw = source['NOTIFY_INGEST_SIGNING_SECRET']
+  if (raw === undefined || raw.trim() === '') {
+    throw new EnvError('NOTIFY_INGEST_SIGNING_SECRET is required')
+  }
+  const secrets = raw
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
-  // Splitting after the length check would let `a,<32 real chars>` through on the strength of the
-  // real one. Every candidate has to stand on its own, because any of them can authenticate an
+  if (secrets.length === 0) {
+    throw new EnvError('NOTIFY_INGEST_SIGNING_SECRET is required')
+  }
+  // Splitting before the check, not after: `a,<32 real chars>` would otherwise pass on the strength
+  // of the real one. Every candidate stands on its own, because any of them can authenticate an
   // ingest that mints a security notice.
-  for (const secret of secrets) {
-    if (PLACEHOLDERS.has(secret.toLowerCase())) {
-      throw new EnvError('NOTIFY_INGEST_SIGNING_SECRET contains a known placeholder')
-    }
-    if (secret.length < 24) {
-      throw new EnvError('every NOTIFY_INGEST_SIGNING_SECRET candidate must be at least 24 characters')
-    }
+  //
+  // The bar is BYTES OF KEY MATERIAL, not characters. A length floor plus a deny-list is what let
+  // `estate-only-outbox-secret-` + zeros run as a live signing key across 44 containers: 40
+  // characters cleared the floor, and it was not the ninth string anyone had thought to list. A
+  // membership test only catches placeholders somebody already imagined, which is precisely the
+  // case where it is not needed.
+  // Re-wrapped, not re-thrown. `loadEnv` promises one error class, and a caller that catches
+  // `EnvError` should not start seeing a second one because the check underneath got better. The
+  // message is carried verbatim, so the boot line an operator reads is the guard's own words.
+  try {
+    assertGeneratedSecretList('NOTIFY_INGEST_SIGNING_SECRET', secrets)
+  } catch (err) {
+    throw new EnvError(err instanceof Error ? err.message : String(err))
   }
 
   const smtpHost = absent(source, 'SMTP_HOST')

@@ -13,7 +13,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-const SECRET = 'K2sN4vQ8xR1wB6tY9zL3mF7hC5jD0pA4'
+// 32 BYTES of key material, not 32 characters. The previous fixture was 32 mixed-alphabet
+// characters carrying 24 bytes, which the old length floor accepted and the measuring guard
+// refuses — the fixture was built to the wrong unit, so it pinned the wrong bar.
+const SECRET = 'TIBeym3hcFJ0Pw/p6XnxmihdgF91LV3EoKint5+Stfg='
 
 /**
  * A valid environment, applied to the process before `./env.ts` is imported.
@@ -99,7 +102,7 @@ test('a short ingest secret is refused', () => {
 })
 
 test('rotation is supported, and every candidate must stand on its own', () => {
-  const older = 'B7hV2nQ5xW9tR4kY6mF1zL8cD3pJ0sA2'
+  const older = 'cAUXCjNaVTKSPlFisKkfwQvY7zZ5J1xHTpOti/pPIEo='
   const env = loadEnv({ ...MINIMAL, NOTIFY_INGEST_SIGNING_SECRET: `${SECRET},${older}` })
   assert.deepEqual(env.ingestSigningSecrets, [SECRET, older])
 

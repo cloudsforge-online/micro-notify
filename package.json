@@ -1,12 +1,14 @@
 {
   "name": "@cloudsforge/notify",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "The platform-wide notification service: event to notification mapping, preferences, templates, dedupe, digests, retries, delivery history, operator broadcasts, and developer webhooks as one pipeline.",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node --import tsx src/index.ts",
     "migrate": "node --import tsx src/migrator.ts",
@@ -19,7 +21,7 @@
   "_runtimeDependencies": [
     "Siblings are consumed as link: rather than file:. A file: path PACKS the directory and honours",
     "'files': ['dist'], which installs a package whose exports point at src/index.ts while src/ was",
-    "never copied — the import then fails at runtime with a module-not-found that names a path",
+    "never copied \u2014 the import then fails at runtime with a module-not-found that names a path",
     "inside node_modules. link: symlinks the working tree, so the unbuilt TypeScript sources these",
     "packages currently export actually resolve.",
     "nodemailer is a runtime dependency and is imported LAZILY, only once SMTP_HOST is set. An",
@@ -36,7 +38,8 @@
     "@cloudsforge/telemetry": "link:../runtime/packages/telemetry",
     "nodemailer": "^6.9.16",
     "postgres": "^3.4.5",
-    "tsx": "^4.19.2"
+    "tsx": "^4.19.2",
+    "@cloudsforge/secrets": "file:../runtime/packages/secrets"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
