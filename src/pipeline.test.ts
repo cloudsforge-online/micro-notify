@@ -503,7 +503,7 @@ describe('pipeline', { skip }, () => {
   /**
    * This used to ingest `identity.password.changed` and assert a "password was changed" subject.
    * It passed, and the notification it proved could never happen: identity emits no such topic. It
-   * revokes every session with a reason (identity/src/server.ts:960), which is the event below.
+   * revokes every session with a reason (identity/src/server.ts), which is the event below.
    */
   test('a password change reaches the user as the session revocation identity really emits', async () => {
     const rig = testRig(sql)
@@ -631,7 +631,7 @@ describe('pipeline', { skip }, () => {
    *
    * This is the §10.3 invariant applied to the case it was not written for, and the reason it has
    * to hold here is specific: wallet's non-refundable branch moves the row to `stuck` and emits
-   * nothing (`wallet/src/withdrawals.ts:592`), so this notification is the only account the owner
+   * nothing (`wallet/src/withdrawals.ts`), so this notification is the only account the owner
    * of that money will ever get. A preference that could silence it would turn "your withdrawal
    * failed and your funds are held" into silence.
    */
@@ -741,7 +741,7 @@ describe('pipeline', { skip }, () => {
    *
    * settlement made it a required boolean, so this is a relay dropping a field, a replay of an old
    * event, or a rewrite that made it optional again. In every one of those the truthful answer is
-   * "we do not know", and the notification must read as HELD — because `wallet/src/server.ts:875`
+   * "we do not know", and the notification must read as HELD — because `wallet/src/server.ts`
    * refuses to refund without proof, and a notification saying the money is on its way back while
    * wallet holds it is the one error nobody can take back.
    */

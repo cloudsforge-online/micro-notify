@@ -18,8 +18,8 @@
  * very much written and emitting a **different name**:
  *
  * Each cites the producer by a NAME rather than by a line. Half of the `path:line` citations in
- * this paragraph were stale the last time anybody read them — `identity/src/server.ts:960` had
- * become a log line, `market/src/bids.ts:432` a field assignment — and a citation that has drifted
+ * this paragraph were stale the last time anybody read them — `identity/src/server.ts` had
+ * become a log line, `market/src/bids.ts` a field assignment — and a citation that has drifted
  * to a plausible neighbour is worse than none, because it reads as verified. A constant or a
  * function name moves with the code it names.
  *
@@ -83,16 +83,16 @@
  * ## And both of those two have since closed, which is the fourth thing this file has learned
  *
  * `settlement.outbound.failed` is a rule now. Its record said the envelope named nobody; settlement
- * put `userId` on the payload (`settlement/src/withdrawals.ts:537`) and the sentence stopped being
+ * put `userId` on the payload (`settlement/src/withdrawals.ts`) and the sentence stopped being
  * true. `contradictedGaps()` is what forced the record's deletion — a rule and a record for the
  * same topic cannot both stand — so the repair emptied the record instead of leaving it beside the
  * code contradicting it. That is the property the five deleted records did not have, working, in
  * the one repository that can see it.
  *
  * `market.offer.made` closed the same way and within the hour. This paragraph used to read "has NOT
- * closed and is checked, not assumed", citing `bids.ts:432` for an envelope of
+ * closed and is checked, not assumed", citing `bids.ts` for an envelope of
  * `{ listingId, offerId, offererSubject, amount, assetCode }` with no seller on it. That was true
- * when written and is now false twice over: `market/src/bids.ts:477` sends `sellerSubject`, read
+ * when written and is now false twice over: `market/src/bids.ts` sends `sellerSubject`, read
  * off the listing row the emitting transaction holds `for update`, and the line numbers had drifted
  * besides. Both are the warning this file's own header gives about `path:line` citations — a prose
  * paragraph is the one part of this file nothing can fail on, so it is the part that rots. What is
@@ -177,7 +177,7 @@ export interface ProposedTopic {
  * itself had written down; each was quarantined with the spec that would register it, copied
  * verbatim from the producing service's own quarantine so the two repositories could not propose
  * two different contracts for one topic. `micro-contracts` adopted all three
- * (`contracts/packages/events/src/index.ts:718`, `:725`, `:732`) — its own commit says landing them
+ * (`contracts/packages/events/src/index.ts`) — its own commit says landing them
  * "makes `adoptedProposals()` non-empty in micro-trade, micro-devplatform and micro-notify, whose
  * suites now fail until the matching quarantine entries are deleted. That is the self-emptying
  * quarantine working, not a regression this commit introduced." It was right: this repository's
@@ -190,9 +190,9 @@ export interface ProposedTopic {
  * field that made it writable, and the topic was still unregistered. Without this table the choice
  * would have been between a rule nothing can see is ahead of the registry and a record that has
  * stopped being true. `micro-contracts` registered it two hours later (5e0d11a, pasting the spec
- * and re-reading `keyedBy` off `market/src/bids.ts:450`), `adoptedProposals()` turned this suite
+ * and re-reading `keyedBy` off `market/src/bids.ts`), `adoptedProposals()` turned this suite
  * red, and the entry is gone. The rule stays: it is a registered topic now, so
- * `unregisteredRuleTopics()` is what holds it, and `catalogue.ts:797` carries the reasoning.
+ * `unregisteredRuleTopics()` is what holds it, and `catalogue.ts` carries the reasoning.
  *
  * The spec of every entry is copied VERBATIM from the producing service's own quarantine, so
  * `micro-contracts` adopting it is a paste and the two repositories cannot propose two different
@@ -204,7 +204,7 @@ export interface ProposedTopic {
  *
  * That entry was the first one here that was ahead of its PRODUCER rather than merely ahead of the
  * registry. Both have now landed: `micro-identity` 1.1.0 emits it
- * (`identity/src/emailVerification.ts:167`) and `micro-contracts` registers it
+ * (`identity/src/emailVerification.ts`) and `micro-contracts` registers it
  * (`contracts/packages/events/src/index.ts`, from identity's verbatim spec).
  *
  * ── WHAT THE GAP BETWEEN THE THREE LANDINGS COST, LIVE ────────────────────────────────────────
@@ -346,7 +346,7 @@ export const UNPRODUCED_NOTIFICATIONS: readonly UnproducedNotification[] = Objec
    *
    * The record was right when it was written and stopped being right in an hour. Its condition was
    * "an envelope on it names nobody this service could notify", and settlement put `userId` on the
-   * payload (settlement/src/withdrawals.ts:537) — the same value `stuckEvents` already sent off the
+   * payload (settlement/src/withdrawals.ts) — the same value `stuckEvents` already sent off the
    * same row. Worth noting what settlement did NOT do: this record's own evidence said "the repair
    * is settlement emitting one [a user-facing twin], exactly as it added the stuck twin", and
    * settlement declined, on the grounds that a `.failed` twin would be one fact under two official
@@ -367,7 +367,7 @@ export const UNPRODUCED_NOTIFICATIONS: readonly UnproducedNotification[] = Objec
    * The second record to close in an hour, and the second whose deletion `contradictedGaps()`
    * forced rather than requested. Its evidence said the seller "is not carried" and that
    * "`listing.sellerSubject` is in scope three lines above the emit and is not put on the event".
-   * `micro-market` put it on the event — `market/src/bids.ts:477`, commit "three topics named the
+   * `micro-market` put it on the event — `market/src/bids.ts`, commit "three topics named the
    * person who acted, not the person it happened to" — and its own quarantine entry names this
    * record as the thing that closes when notify writes the rule. It is written.
    *

@@ -237,9 +237,9 @@ function flag(payload: Record<string, unknown>, names: readonly string[]): boole
  * **`=== true`, and deliberately not `flag()`.** `flag` accepts `'true'` as a string and reads
  * several spellings, which is the right tolerance for a `new_device` marker and the wrong one
  * here: this predicate has to agree, byte for byte, with the consumer that actually moves the
- * money. `wallet/src/server.ts:875` writes `refundable: payload['refundable'] === true` and says
+ * money. `wallet/src/server.ts` writes `refundable: payload['refundable'] === true` and says
  * why — refunding a payment that really landed pays the user twice, and that error cannot be
- * undone. `activity/src/classify.ts:192` mirrors the same `=== true` so a feed entry can never
+ * undone. `activity/src/classify.ts` mirrors the same `=== true` so a feed entry can never
  * read "on its way back" beside a balance wallet is holding.
  *
  * So an absent field, a string, a number and a null all mean HELD, which is the safe direction and
@@ -277,7 +277,7 @@ function stuckWithdrawalIdOf(event: InboundEvent): string {
 /**
  * Did the bytes reach the network? **Evidence only — absence is not a "no".**
  *
- * `settlement/src/withdrawals.ts:702` sends `broadcastAt` as an ISO string or `null`, and a row
+ * `settlement/src/withdrawals.ts` sends `broadcastAt` as an ISO string or `null`, and a row
  * reaches `stuck` from either `signed` or `broadcast`. `str` treats an empty string as absent, so
  * a blank field cannot read as a timestamp — the empty-string trap that keeps producing defects
  * in this codebase (`BigInt('') === 0n`) in its stringly form.
@@ -314,7 +314,7 @@ function userIdOf(event: InboundEvent): string | null {
  * and slicing without checking the prefix turns `service:mint` into a "user id" of `mint`. That
  * row is well-formed, insertable and filed against a user who does not exist — the custody defect
  * in its consumer-side form, and a real possibility here rather than a hypothetical: a market
- * listing may be owned by a service principal (`market/src/server.ts:713` takes the seller from
+ * listing may be owned by a service principal (`market/src/server.ts` takes the seller from
  * `subjectOf(principal)`), and a tessera parcel by whatever `ensureAccount` was handed.
  *
  * ## The two "nobody" answers, which must not collapse
@@ -349,8 +349,8 @@ export function userOfSubject(subject: string): SubjectResolution {
 /**
  * identity's revocation reasons, in words a person can act on.
  *
- * The producer's vocabulary, not a guess: `identity/src/server.ts:960`, `:1032`, `:1095`, `:1104`
- * and `identity/src/sessions.ts:366`. An unrecognised reason falls back to a sentence that is
+ * The producer's vocabulary, not a guess: `identity/src/server.ts`
+ * and `identity/src/sessions.ts`. An unrecognised reason falls back to a sentence that is
  * still true, because a new reason arriving from a newer identity must not blank the notification
  * — and the fallback is deliberately vague rather than wrong.
  */
@@ -520,8 +520,8 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
    *
    * This replaces a rule on `identity.password.changed` — a topic **no producer has ever
    * emitted**. identity does not announce a password change as its own fact; it revokes every
-   * session and says why, at `identity/src/server.ts:960` (`password_changed`), `:1032`
-   * (`password_reset`), `:1095` (`signed_out_everywhere`) and `:1104` (`signed_out`). So the §10.3
+   * session and says why, at `identity/src/server.ts` (`password_changed`)
+   * (`password_reset`) (`signed_out_everywhere`) and (`signed_out`). So the §10.3
    * password-change notification was written against a name that does not exist, and this is the
    * event that actually carries the fact.
    *
@@ -529,7 +529,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
    * confirming it is how a security channel is trained into background noise. Everything else is —
    * a revocation the user did not perform is the visible half of an account takeover.
    *
-   * NOTE for whoever wires the producer: `emitSessionRevoked` (identity/src/sessions.ts:390) has
+   * NOTE for whoever wires the producer: `emitSessionRevoked` (identity/src/sessions.ts) has
    * no caller. `revokeSession` and `revokeAllSessions` update the rows without emitting, so this
    * rule is correct and silent until identity calls it from those two functions.
    */
@@ -670,7 +670,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     why: 'The first thing the platform ever says to someone.',
     // No `learns`, and that is a statement about the producer rather than a decision here.
     // identity's registration payload is `{ userId, handle, organisationId, organisationSlug }`
-    // (identity/src/users.ts:148-156) and carries **no address at all**, so there is nothing on this
+    // (identity/src/users.ts) and carries **no address at all**, so there is nothing on this
     // event for this service to keep. The address arrives on the verification event below.
     recipients: forUser(
       (event) => `account.registered:${event.key}`,
@@ -896,8 +896,8 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
    * This rule rendered `withdrawal.failed` — "Nothing has left your balance. You can try again." —
    * and both halves were false here. The reservation moves `available → reserved` at request time
    * and going stuck returns none of it: `markStuck` is "never a refund"
-   * (`settlement/src/worker.ts:524`), and wallet's twin sweep "does not refund anything — the
-   * payment may have landed" (`wallet/src/withdrawals.ts:656`). So the one sentence the mail
+   * (`settlement/src/worker.ts`), and wallet's twin sweep "does not refund anything — the
+   * payment may have landed" (`wallet/src/withdrawals.ts`). So the one sentence the mail
    * existed to reassure with told a user their money was untouched while it was reserved and
    * unspendable, and the retry it invited would have taken a second reservation out of what was
    * left. See `withdrawal.stuck` in `templates.ts` for the rest of the reasoning.
@@ -958,7 +958,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
    * for ever, and a rule that resolves nobody is worse than a written-down gap, because the
    * coverage test counts it.
    *
-   * `settlement/src/withdrawals.ts:537` now sends `userId` — the same value `stuckEvents` already
+   * `settlement/src/withdrawals.ts` now sends `userId` — the same value `stuckEvents` already
    * sent off the same row — so `forUser` resolves a recipient here exactly as it does on
    * `settlement.withdrawal.stuck`. Note what settlement did **not** do: it did not mint
    * `settlement.withdrawal.failed`. Its reasoning is on `failedEvents` and it is right — `completed`
@@ -971,7 +971,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
    *
    * "Your withdrawal failed and the money is coming back" and "your withdrawal failed and your
    * money is held" are different news, and micro-activity classified them as two entries
-   * (`withdrawal.failed_refunded` / `withdrawal.failed_held`, activity/src/classify.ts:502) for
+   * (`withdrawal.failed_refunded` / `withdrawal.failed_held`, activity/src/classify.ts) for
    * exactly this reason. So this rule has a `variant` rather than one hedged sentence, and the
    * templates keep activity's names so the feed entry and the notification a user reads on the
    * same screen cannot say opposite things.
@@ -981,8 +981,8 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
    * §10.3's critical list names **withdrawal**, so neither of these is a promotion beyond it; the
    * question is only which of the two a user may be allowed to mute. The held case may not be, on
    * one fact: **nothing else in the estate will ever tell them.** Trace it. wallet's non-refundable
-   * branch (`wallet/src/withdrawals.ts:592`) moves the row to `stuck` and emits nothing at all —
-   * the only `wallet.withdrawal.stuck` emit is the deadline sweep at `:684`, and that topic is in
+   * branch (`wallet/src/withdrawals.ts`) moves the row to `stuck` and emits nothing at all —
+   * the only `wallet.withdrawal.stuck` emit is the deadline sweep, and that topic is in
    * no registry anyway. `settlement.withdrawal.stuck` does not fire, because a failure is not a
    * late transaction. `ledger.entry.posted` does not fire either: nothing is posted, and notify's
    * rule for it requires a `user_id` the ledger payload has never carried. The user's balance shows
@@ -1102,7 +1102,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
    * about — see `topics.test.ts`, `the two illegal actor spellings can never come back`:
    *
    *   1. **The prediction is now a property of the CONTRACT, not of another repository's line
-   *      numbers.** The version of this note that cited `server.ts:669` and `:1527` was stale within
+   *      numbers.** The version of this note that cited `server.ts` and was stale within
    *      the hour those defects were fixed, which is how a `path:line` claim always ends. What
    *      cannot go stale is `parseActor` refusing `key:` and `system:<anything>`, and that is
    *      checkable in this repository's CI, which checks out `micro-contracts` and not
@@ -1175,7 +1175,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
    * offerer that their own offer arrived: noise, a false claim of AD-08 coverage, and a
    * notification about someone else's money sent to the wrong person.
    *
-   * `market/src/bids.ts:477` now sends `sellerSubject`, read off the listing row the same
+   * `market/src/bids.ts` now sends `sellerSubject`, read off the listing row the same
    * transaction already holds `for update`, so it is the seller **at the moment the offer was
    * made** rather than whoever owns the listing when a consumer gets round to reading it. Market's
    * own commit names this rule as the thing that closes its record.
@@ -1190,7 +1190,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
    * ## A subject is not a user id
    *
    * `sellerSubject` is `user:<uuid>` **or** `service:<name>`: a listing may be owned by a service
-   * principal (`market/src/server.ts:713` takes the seller from `subjectOf(principal)`). Stripping
+   * principal (`market/src/server.ts` takes the seller from `subjectOf(principal)`). Stripping
    * the prefix blindly would address a notification to a service name — a row keyed on a user id
    * that is not one. A non-`user:` seller is `not_applicable`: the rule looked at it and decided a
    * service principal is not a person to interrupt, which is a different fact from "the producer
@@ -1270,7 +1270,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     priority: 'high',
     templateId: 'provision.failed',
     why: 'Money was paid and the thing it bought was not delivered. That is the one game event a person must not discover by revisiting a screen.',
-    // NOT forUser: the payload names the buyer as `subject` (worlds/src/provisioning.ts:608) and
+    // NOT forUser: the payload names the buyer as `subject` (worlds/src/provisioning.ts) and
     // the actor is `service:worlds`, so userIdOf would find nobody and the rule would silently
     // notify no one — the same shape as the raider/defender trap in aetherholm.battle.resolved.
     recipients: (event: InboundEvent): RecipientSet => {
@@ -1791,7 +1791,7 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
   // ── settlement's handover topics ───────────────────────────────────────────────────────────
   // `settlement.outbound.failed` USED TO BE HERE, recorded as "a notification the estate still
   // owes somebody" because its envelope named nobody. It is a rule now: settlement put `userId` on
-  // the payload (withdrawals.ts:537) and the recipient — the only thing that was missing — resolves.
+  // the payload (withdrawals.ts) and the recipient — the only thing that was missing — resolves.
   // The two that remain are settlement talking to wallet or to reconciliation, not to a person.
   'settlement.outbound.confirmed':
     "wallet's own narrow name for the same movement settlement.withdrawal.completed announces (settlement/src/withdrawals.ts:437 and :449 emit both from one function). It exists to release the reservation at wallet/src/server.ts:846 and carries a withdrawal id, a hash and a timestamp. A rule here as well would tell one user their withdrawal arrived twice. Note that this is NOT the shape of the failure twin, which had no user-facing counterpart at all and is now mapped: a second rule here would duplicate a notification, whereas the failure had none.",
@@ -1824,8 +1824,8 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
  * **This comment used to end "identity.user.deleted currently has no subscriber anywhere in the
  * estate, which is precisely why there is no GDPR erasure path", and that has stopped being
  * true.** Three services consume it today: this one (`pipeline.ts`, `eraseUser`),
- * `activity/src/ingest.ts:186`, which erases rather than writing "your account was deleted" into
- * the feed of a user who no longer exists, and `trade/src/server.ts:747`, whose `SUBSCRIBED_TOPICS`
+ * `activity/src/ingest.ts`, which erases rather than writing "your account was deleted" into
+ * the feed of a user who no longer exists, and `trade/src/server.ts`, whose `SUBSCRIBED_TOPICS`
  * holds this and nothing else. The erasure path exists; what nobody has checked is whether every
  * service holding a `user_id` is on it, and that is a question only a checkout holding all of them
  * can answer — `micro-org`'s `tools/estate-topics.mjs`, the same place the cross-repository half of

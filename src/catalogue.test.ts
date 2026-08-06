@@ -76,13 +76,13 @@ test('every notification AD-08 names is either live or a recorded gap', () => {
     'settlement.withdrawal.completed',
     'settlement.withdrawal.stuck',
     // "withdrawal transaction failed outright". Recorded as impossible for the life of this
-    // service because the envelope named nobody; settlement added `userId` (withdrawals.ts:537)
+    // service because the envelope named nobody; settlement added `userId` (withdrawals.ts)
     // and the record in topics.ts had to go, because contradictedGaps() refuses to hold both.
     'settlement.outbound.failed',
     // marketplace sale, and the offer that precedes one
     'market.listing.sold',
     // "marketplace offer received". Refused for the life of the service because the envelope named
-    // only the OFFERER; market/src/bids.ts:477 now sends `sellerSubject`, so the rule goes to the
+    // only the OFFERER; market/src/bids.ts now sends `sellerSubject`, so the rule goes to the
     // person who did NOT act. Still unregistered, so it is quarantined in AWAITING_REGISTRATION.
     'market.offer.made',
     // token deployment
@@ -348,7 +348,7 @@ test('a dedupe key never contains the event id for a fact that two events can de
  * did. Every field below is one identity is to emit: `userId`, `handle`, `email`, `verifyUrl`.
  *
  * The negative half is `identity.user.registered`, and it is not padding. Its payload is
- * `{ userId, handle, organisationId, organisationSlug }` (identity/src/users.ts:148-156) and carries
+ * `{ userId, handle, organisationId, organisationSlug }` (identity/src/users.ts) and carries
  * **no address at all**, which is why the registration mail could never have gone out however well
  * the SMTP was configured. A `learns` on that rule would read `undefined` and store nothing while
  * reporting the gap closed.
@@ -451,7 +451,7 @@ test('every template is reachable from some rule, or is a platform template', ()
   )
   // Produced by the service itself rather than by an event. `system.incident` joined them when
   // the admin_api.incident.opened rule was deleted: an incident reaches users as an operator
-  // broadcast (POST /admin/broadcasts names a template id, pipeline.ts:555), which is the path
+  // broadcast (POST /admin/broadcasts names a template id, pipeline.ts), which is the path
   // that was actually carrying it — the deleted rule was a no-op that never routed anything.
   const platform = new Set(['system.broadcast', 'digest.summary', 'system.incident'])
   for (const id of Object.keys(TEMPLATES)) {
@@ -461,7 +461,7 @@ test('every template is reachable from some rule, or is a platform template', ()
 
 test('provision.failed notifies the SUBJECT, and the service actor never becomes a recipient', () => {
   // worlds.provision.failed is keyed by entitlement id, the buyer is payload.subject
-  // (worlds/src/provisioning.ts:608), and the envelope actor is `service:worlds` — so userIdOf's
+  // (worlds/src/provisioning.ts), and the envelope actor is `service:worlds` — so userIdOf's
   // fallbacks find nobody. The rule reads subject explicitly; this pins both directions, the same
   // trap as aetherholm.battle.resolved's raider/defender.
   const event = registeredEvent('worlds.provision.failed', 'ent-1', {
@@ -614,7 +614,7 @@ test('a registration greets the user by the handle identity sends, not by a disp
 /** A uuid, and deliberately NOT a user's — this is the envelope key for this topic. */
 const WITHDRAWAL = '33333333-3333-4333-8333-333333333333'
 
-/** The exact payload `settlement/src/withdrawals.ts:537` builds. `undefined` omits the field. */
+/** The exact payload `settlement/src/withdrawals.ts` builds. `undefined` omits the field. */
 function failedWithdrawal(refundable: unknown): Record<string, unknown> {
   return {
     withdrawalId: WITHDRAWAL,
@@ -734,8 +734,8 @@ test('a non-refundable failure says the money is held, is critical, and never su
  * `refundable` is a required boolean on settlement's emit today, so an absent field means the
  * producer regressed, a relay dropped it, or an older event is being replayed. Every one of those
  * is a case where the truthful answer is "we do not know", and "we do not know" must read as HELD:
- * `wallet/src/server.ts:875` refuses to refund without proof because refunding a payment that
- * really landed pays the user twice, and `activity/src/classify.ts:192` mirrors it so a feed entry
+ * `wallet/src/server.ts` refuses to refund without proof because refunding a payment that
+ * really landed pays the user twice, and `activity/src/classify.ts` mirrors it so a feed entry
  * cannot contradict the balance on the same screen. This rule is the third reader and defaults the
  * same way. The string and the number are here because `refundable` arriving over JSON from a
  * producer that stringified it is the realistic near-miss, and `=== true` refuses all of them.
@@ -804,8 +804,8 @@ test('a late withdrawal and a failed one are two notifications, not one deduped 
  *
  * The reservation posts `available → reserved` when the withdrawal is REQUESTED, and reaching
  * `stuck` returns none of it: settlement's `markStuck` is "never a refund"
- * (`settlement/src/worker.ts:524`) and wallet's twin sweep "does not refund anything — the payment
- * may have landed" (`wallet/src/withdrawals.ts:656`). So while this mail is being read, the money
+ * (`settlement/src/worker.ts`) and wallet's twin sweep "does not refund anything — the payment
+ * may have landed" (`wallet/src/withdrawals.ts`). So while this mail is being read, the money
  * is reserved and unspendable — and the mail said "Nothing has left your balance. You can try
  * again."
  *
@@ -814,7 +814,7 @@ test('a late withdrawal and a failed one are two notifications, not one deduped 
  * against a balance that is still holding the first reservation, goes red here.
  * -------------------------------------------------------------------------------------------- */
 
-/** Settlement's payload, as `stuckEvents` really builds it (`settlement/src/withdrawals.ts:687`). */
+/** Settlement's payload, as `stuckEvents` really builds it (`settlement/src/withdrawals.ts`). */
 function stuckWithdrawal(broadcastAt: string | null): Record<string, unknown> {
   return {
     outboundId: '44444444-4444-4444-8444-444444444444',
@@ -947,7 +947,7 @@ test('the sentence #221 is about is gone from the service, not just unreferenced
 
 const LISTING = '55555555-5555-4555-8555-555555555555'
 
-/** The payload `market/src/bids.ts:449` builds, with the seller supplied. */
+/** The payload `market/src/bids.ts` builds, with the seller supplied. */
 function offerMade(sellerSubject: unknown): Record<string, unknown> {
   return {
     listingId: LISTING,
@@ -1002,7 +1002,7 @@ test("yesterday's offer payload, with no seller, is no_recipient rather than the
 /**
  * A listing owned by a service principal.
  *
- * `market/src/server.ts:713` takes the seller from `subjectOf(principal)`, which spells a service
+ * `market/src/server.ts` takes the seller from `subjectOf(principal)`, which spells a service
  * `service:<name>`. Stripping `user:` blindly would produce a "user id" of `mint` — a notification
  * row filed against a user that does not exist, on a table nobody can read. `not_applicable` and
  * not `no_recipient`, because the producer said exactly who the seller is and the answer is that

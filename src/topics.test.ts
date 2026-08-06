@@ -89,7 +89,7 @@ test('a rule ahead of its producer says so, and names who is writing the produce
   /*
    * EMPTY, and it got there the way the ratchet above says it should: the producer landed and then
    * the registry did. `identity.email.verification_requested` was the only entry this list has ever
-   * held — `micro-identity` 1.1.0 emits it at `identity/src/emailVerification.ts:167`, and
+   * held — `micro-identity` 1.1.0 emits it at `identity/src/emailVerification.ts`, and
    * `micro-contracts` has registered it, which fires `adoptedProposals()` and deletes the entry.
    *
    * The list stays EXACT rather than becoming a floor for the reason the header gives: a state that
@@ -256,7 +256,7 @@ test('a recorded gap disappears once this service writes the rule it said was im
 test('each newly live rule addresses a real recipient from the payload its producer really sends', () => {
   const cases = [
     {
-      // trade/src/bots.ts:614 — payload { botId }, actor the bot's OWNER.
+      // trade/src/bots.ts — payload { botId }, actor the bot's OWNER.
       topic: 'trade.bot.paused',
       payload: { botId: 'bot-1' },
       actor: `user:${ALICE}`,
@@ -328,7 +328,7 @@ test('each newly live rule addresses a real recipient from the payload its produ
  * were invisible only because `activity` quarantined their (then unregistered) topic without
  * validating the envelope.
  *
- * The note also cited `devplatform/src/server.ts:669` and `:1527`, and both citations were stale
+ * The note also cited `devplatform/src/server.ts` and, and both citations were stale
  * within the hour the defects were fixed. That is what a cross-repository `path:line` claim always
  * does, and it is why the record is kept HERE instead: the fault was never at a line number, it was
  * a contract violation, and the contract is a dependency this repository's CI actually resolves.
@@ -376,8 +376,8 @@ test('the two illegal actor spellings can never come back', () => {
  * and each record then contradicted a rule in this repository's own catalogue — which is what
  * `contradictedGaps()` fails on, so the repair could not leave the record behind.
  *
- *   - `settlement.outbound.failed` — `userId`, settlement/src/withdrawals.ts:537.
- *   - `market.offer.made` — `sellerSubject`, market/src/bids.ts:477.
+ *   - `settlement.outbound.failed` — `userId`, settlement/src/withdrawals.ts.
+ *   - `market.offer.made` — `sellerSubject`, market/src/bids.ts.
  *
  * That is the lesson worth keeping: `blockedBy: 'no-subject'` is the most PERISHABLE state a record
  * can be in, because the repair is a field rather than a design. Both were written as though they
@@ -439,7 +439,7 @@ test('every no-subject record that a producer has since fixed is gone', () => {
  * The record that closed, checked from both ends.
  *
  * `settlement.outbound.failed` was a `no-subject` record and it is now a rule, because settlement
- * put `userId` on the payload (`settlement/src/withdrawals.ts:537`). Three things had to move
+ * put `userId` on the payload (`settlement/src/withdrawals.ts`). Three things had to move
  * together, and a test that checked only one would let the other two rot:
  *
  *   1. the rule exists — otherwise the notification is still missing;
@@ -553,7 +553,7 @@ test('the topics registered from a live producer are the ones this service alrea
 
 test('the password-change notification is keyed to the event identity really emits', () => {
   // identity announces no password change; it revokes every session with a reason
-  // (identity/src/server.ts:960). §10.3's password-change entry rides that event or it does not
+  // (identity/src/server.ts). §10.3's password-change entry rides that event or it does not
   // exist at all, which is what it did for the whole life of this service.
   assert.equal(hasRule('identity.session.revoked'), true)
   assert.equal(isRegisteredTopic('identity.session.revoked'), true)

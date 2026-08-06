@@ -300,8 +300,8 @@ export const TEMPLATES = Object.freeze({
    *
    * These are two templates and not one parameterised sentence, because the fact they report is
    * two facts: `refundable` on `settlement.outbound.failed` decides whether the money is coming
-   * back or is held, and every reader in the estate splits on it (`wallet/src/server.ts:875`,
-   * `activity/src/classify.ts:502`). The ids are activity's own type names, so the feed entry and
+   * back or is held, and every reader in the estate splits on it (`wallet/src/server.ts`,
+   * `activity/src/classify.ts`). The ids are activity's own type names, so the feed entry and
    * the notification a user sees on one screen cannot disagree.
    *
    * Neither carries an amount. settlement's failure payload is
@@ -340,17 +340,17 @@ export const TEMPLATES = Object.freeze({
    * are false for this topic and the second is dangerous:
    *
    *   - The reservation posts `available → reserved` when the withdrawal is REQUESTED
-   *     (`wallet/src/withdrawals.ts:551`), so value has already left the available balance. Going
-   *     stuck returns nothing — `markStuck` is "never a refund" (`settlement/src/worker.ts:524`)
+   *     (`wallet/src/withdrawals.ts`), so value has already left the available balance. Going
+   *     stuck returns nothing — `markStuck` is "never a refund" (`settlement/src/worker.ts`)
    *     and wallet's own sweep "does not refund anything — the payment may have landed"
-   *     (`wallet/src/withdrawals.ts:656`). The money is held, and the mail said it was untouched.
+   *     (`wallet/src/withdrawals.ts`). The money is held, and the mail said it was untouched.
    *   - "You can try again" invites a second reservation against the balance the first is still
    *     holding. `withdrawal.failed_held` above already refuses to say it, for this exact reason.
    *
    * ## Why two templates and not one
    *
    * Same argument as the failed pair: two facts, not one parameterised sentence. `stuck` is
-   * reached from `signed` or `broadcast` (`settlement/src/worker.ts:526`), and `broadcastAt` on
+   * reached from `signed` or `broadcast` (`settlement/src/worker.ts`), and `broadcastAt` on
    * the payload is the evidence that separates them. The DEFAULT is the reading that holds when
    * there is no such evidence — we do not know whether anything reached the network — and the
    * variant has to be EARNED by a `broadcastAt`, which is the direction `Variant` is documented to
@@ -359,7 +359,7 @@ export const TEMPLATES = Object.freeze({
    *
    * ## Neither carries an amount, and that is deliberate
    *
-   * The payload's `amount` is SMALLEST UNITS (`settlement/src/withdrawals.ts:518` —
+   * The payload's `amount` is SMALLEST UNITS (`settlement/src/withdrawals.ts` —
    * `row.amount.toString()` off a `numeric(78,0)`), and notify has no decimals for any asset: no
    * `contracts-chain` dependency, no divisor, no formatter. Rendering it raw is the live defect
    * #199 — 1.5 LTC reads as "150000000" — and the old `withdrawal.failed` mail was doing exactly
@@ -369,7 +369,7 @@ export const TEMPLATES = Object.freeze({
    * Not a guess here, and not a factor of 10^10 in a sentence about someone's money.
    *
    * Both point the reader at the balance instead, where `GET /v1/portfolio` reports `available`
-   * and `reserved` as separate rows carrying a `purpose` (`wallet/src/portfolio.ts:180-204`), so
+   * and `reserved` as separate rows carrying a `purpose` (`wallet/src/portfolio.ts`), so
    * the held amount is a number the user can actually see — as reserved, not as spendable.
    * ------------------------------------------------------------------ */
   'withdrawal.stuck': Object.freeze({
