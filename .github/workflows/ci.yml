@@ -32,7 +32,7 @@ jobs:
       smoke-env: |
         IDENTITY_JWKS_URL=http://127.0.0.1:4001/.well-known/jwks.json
         IDENTITY_ISSUER=http://127.0.0.1:4001
-        NOTIFY_INGEST_SIGNING_SECRET=ci-only-not-a-real-secret-000000000000
+        NOTIFY_INGEST_SIGNING_SECRET=@generate
         NOTIFY_PUBLIC_URL=http://127.0.0.1:4600
     secrets:
       # @cloudsforge/* is resolved by link:../runtime and link:../contracts, so CI checks out
