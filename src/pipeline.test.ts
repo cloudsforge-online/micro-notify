@@ -13,6 +13,21 @@
  *
  * They skip without `NOTIFY_TEST_DATABASE_URL`, and the suite runs `--test-concurrency=1` because
  * `resetNotify` truncates.
+ *
+ * ## Why the email fixtures are `@cloudsforge.online` and not `@example.test`
+ *
+ * They were `@example.test` until 2.4.0, when `reserved.ts` began refusing exactly that domain
+ * (RFC 6761 §6). Nothing here is a guarantee about a DOMAIN — these tests are about backoff,
+ * dead-lettering, digest windows and preference overrides — so a fixture that is silently never
+ * routed to email stops testing any of them while still passing its `assert`s in six of the
+ * cases below and failing in eight. CI caught it; running locally without Postgres did not.
+ *
+ * The estate's own domain is the honest fixture: it is deliverable, no transport is ever opened
+ * (`testRig` passes one), and it cannot become reserved later. The tests that DO want a refused
+ * address say `beacon.test` at the point of use, where a reader can see why.
+ *
+ * The webhook fixtures below keep `example.test` deliberately. The rule is scoped to
+ * `channel === 'email'`, and an unreachable URL is what those tests want.
  */
 
 import assert from 'node:assert/strict'
@@ -84,7 +99,7 @@ describe('pipeline', { skip }, () => {
   test('a critical notification is delivered with every preference disabled', async () => {
     const rig = testRig(sql)
     await upsertPreferences(sql, ALICE, everythingDisabled())
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
     await upsertTarget(sql, { userId: ALICE, channel: 'sms', address: '+441234567890' })
 
     const outcome = await ingestEvent(
@@ -238,7 +253,7 @@ describe('pipeline', { skip }, () => {
       retryable: true,
       detail: 'the relay is refusing connections',
     })
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
 
     await ingestEvent(
       rig.deps,
@@ -269,7 +284,7 @@ describe('pipeline', { skip }, () => {
       retryable: true,
       detail: 'the relay is refusing connections',
     })
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
 
     await ingestEvent(
       rig.deps,
@@ -307,7 +322,7 @@ describe('pipeline', { skip }, () => {
         }),
       },
     })
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
 
     await ingestEvent(
       rig.deps,
@@ -337,7 +352,7 @@ describe('pipeline', { skip }, () => {
   test('a digest preference batches rather than sending, and the batch fires on its schedule', async () => {
     const at = new Date('2026-07-30T10:20:00.000Z')
     const rig = testRig(sql, { now: () => at })
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
     await upsertPreferences(sql, ALICE, [
       { category: 'transfer', channel: 'email', enabled: true, digest: 'hourly', minPriority: 'low' },
       { category: 'transfer', channel: 'in_app', enabled: true, digest: 'hourly', minPriority: 'low' },
@@ -547,7 +562,7 @@ describe('pipeline', { skip }, () => {
 
   test('identity.user.deleted erases everything this service holds', async () => {
     const rig = testRig(sql)
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
     await upsertPreferences(sql, ALICE, [
       { category: 'market', channel: 'email', enabled: false, digest: 'off', minPriority: 'low' },
     ])
@@ -578,8 +593,8 @@ describe('pipeline', { skip }, () => {
 
   test('an operator broadcast reaches every reachable user exactly once', async () => {
     const rig = testRig(sql)
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
-    await upsertTarget(sql, { userId: BOB, channel: 'email', address: 'bob@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
+    await upsertTarget(sql, { userId: BOB, channel: 'email', address: 'bob@cloudsforge.online' })
 
     const broadcast = await insertBroadcast(sql, {
       category: 'system',
@@ -638,7 +653,7 @@ describe('pipeline', { skip }, () => {
   test('a failed withdrawal with the money held reaches a user who has muted everything', async () => {
     const rig = testRig(sql)
     await upsertPreferences(sql, ALICE, everythingDisabled())
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
 
     const outcome = await ingestEvent(
       rig.deps,
@@ -675,7 +690,7 @@ describe('pipeline', { skip }, () => {
 
   test('a refundable failure says the money is coming back, and is muteable', async () => {
     const rig = testRig(sql)
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
 
     await ingestEvent(
       rig.deps,
@@ -747,7 +762,7 @@ describe('pipeline', { skip }, () => {
    */
   test('a failure payload with refundable dropped is delivered as HELD, not as a refund', async () => {
     const rig = testRig(sql)
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
 
     await ingestEvent(rig.deps, failure({ withdrawalId: WITHDRAWAL, userId: ALICE, reason: 'unknown' }))
     const rows = await sql<Array<{ priority: string; template_id: string }>>`
@@ -797,8 +812,8 @@ describe('pipeline', { skip }, () => {
 
   test('a contest reaches the owner losing the ground, and never the challenger who opened it', async () => {
     const rig = testRig(sql)
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
-    await upsertTarget(sql, { userId: BOB, channel: 'email', address: 'bob@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
+    await upsertTarget(sql, { userId: BOB, channel: 'email', address: 'bob@cloudsforge.online' })
 
     const outcome = await ingestEvent(
       rig.deps,
@@ -831,7 +846,7 @@ describe('pipeline', { skip }, () => {
       }
     }
     const email = rig.adapters.email.sent[0]?.message
-    assert.equal(email?.address, 'alice@example.test')
+    assert.equal(email?.address, 'alice@cloudsforge.online')
     const text = `${email?.subject}\n${email?.body}`
     assert.match(text, new RegExp(PARCEL), 'which parcel — a reader may hold dozens')
     assert.match(text, /still yours/, 'what is NOT lost, or the reader learns only that they lost')
@@ -842,8 +857,8 @@ describe('pipeline', { skip }, () => {
 
   test('a venue booking reaches the owner being paid, and never the booker who made it', async () => {
     const rig = testRig(sql)
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
-    await upsertTarget(sql, { userId: BOB, channel: 'email', address: 'bob@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
+    await upsertTarget(sql, { userId: BOB, channel: 'email', address: 'bob@cloudsforge.online' })
 
     await ingestEvent(
       rig.deps,
@@ -878,7 +893,7 @@ describe('pipeline', { skip }, () => {
       }
     }
     const email = rig.adapters.email.sent[0]?.message
-    assert.equal(email?.address, 'alice@example.test')
+    assert.equal(email?.address, 'alice@cloudsforge.online')
     const text = `${email?.subject}\n${email?.body}`
     assert.match(text, /2026-09-01 18:00 UTC/)
     assert.match(text, /escrowed/)
@@ -901,7 +916,7 @@ describe('pipeline', { skip }, () => {
   test('a booking is suppressed for an owner who has muted everything — it is high, not critical', async () => {
     const rig = testRig(sql)
     await upsertPreferences(sql, ALICE, everythingDisabled())
-    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@example.test' })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
 
     const outcome = await ingestEvent(
       rig.deps,
@@ -939,7 +954,7 @@ describe('pipeline', { skip }, () => {
    */
   test("yesterday's tessera payloads write nothing, rather than a notification for the actor", async () => {
     const rig = testRig(sql)
-    await upsertTarget(sql, { userId: BOB, channel: 'email', address: 'bob@example.test' })
+    await upsertTarget(sql, { userId: BOB, channel: 'email', address: 'bob@cloudsforge.online' })
 
     // `{ parcelId, contestId, challengerSubject }` — no owner, and Bob on the actor and the payload.
     const contest = await ingestEvent(
@@ -1011,7 +1026,7 @@ describe('pipeline', { skip }, () => {
       verification({
         userId: ALICE,
         handle: 'alice',
-        email: 'alice@example.test',
+        email: 'alice@cloudsforge.online',
         verifyUrl: VERIFY_LINK,
       }),
     )
@@ -1022,13 +1037,13 @@ describe('pipeline', { skip }, () => {
     `
     assert.equal(targets.length, 1, 'the event carried an address and this service kept it')
     assert.equal(targets[0]?.channel, 'email')
-    assert.equal(targets[0]?.address, 'alice@example.test')
+    assert.equal(targets[0]?.address, 'alice@cloudsforge.online')
     assert.equal(targets[0]?.verified_at, null, 'unverified: identity has not said the address is real')
 
     const summary = await dispatchDue(rig.deps, 50)
     assert.equal(summary.sent, 2, 'in-app and, for the first time in this service, email')
     const mail = rig.adapters.email.sent[0]?.message
-    assert.equal(mail?.address, 'alice@example.test')
+    assert.equal(mail?.address, 'alice@cloudsforge.online')
     assert.equal(mail?.link, VERIFY_LINK, 'the link in the mail is the one identity minted')
     assert.match(mail?.subject ?? '', /confirm/i)
   })
@@ -1041,8 +1056,8 @@ describe('pipeline', { skip }, () => {
     // address that means every LATER notification sent twice, one of them to an inbox the person
     // has already given up.
     const rig = testRig(sql)
-    await ingestEvent(rig.deps, verification({ userId: ALICE, handle: 'alice', email: 'old@example.test', verifyUrl: VERIFY_LINK }))
-    await ingestEvent(rig.deps, verification({ userId: ALICE, handle: 'alice', email: 'new@example.test', verifyUrl: VERIFY_LINK }))
+    await ingestEvent(rig.deps, verification({ userId: ALICE, handle: 'alice', email: 'old@cloudsforge.online', verifyUrl: VERIFY_LINK }))
+    await ingestEvent(rig.deps, verification({ userId: ALICE, handle: 'alice', email: 'new@cloudsforge.online', verifyUrl: VERIFY_LINK }))
 
     const rows = await sql<Array<{ address: string; active: boolean }>>`
       select address, active from channel_targets where user_id = ${ALICE} and channel = 'email'
@@ -1051,8 +1066,8 @@ describe('pipeline', { skip }, () => {
     assert.deepEqual(rows.map((row) => ({ address: row.address, active: row.active })), [
       // Deactivated rather than deleted: `deliveries.target_id` is `on delete set null`, and
       // blanking it would erase which address every message already sent there went to.
-      { address: 'new@example.test', active: true },
-      { address: 'old@example.test', active: false },
+      { address: 'new@cloudsforge.online', active: true },
+      { address: 'old@cloudsforge.online', active: false },
     ])
 
     // The LATER notification is the one that must not double. Each verification mail is still
@@ -1066,7 +1081,7 @@ describe('pipeline', { skip }, () => {
     const alerted = rig.adapters.email.sent
       .filter((each) => each.message.templateId === 'security.key_exported')
       .map((each) => each.message.address)
-    assert.deepEqual(alerted, ['new@example.test'], 'one alert, to the address in use')
+    assert.deepEqual(alerted, ['new@cloudsforge.online'], 'one alert, to the address in use')
   })
 
   /**
@@ -1176,7 +1191,7 @@ describe('pipeline', { skip }, () => {
     const rig = testRig(sql)
     await ingestEvent(
       rig.deps,
-      verification({ userId: ALICE, handle: 'alice', email: 'alice@example.test', verifyUrl: VERIFY_LINK }),
+      verification({ userId: ALICE, handle: 'alice', email: 'alice@cloudsforge.online', verifyUrl: VERIFY_LINK }),
     )
 
     const page = await listNotifications(sql, ALICE, { limit: 10, cursor: null, unreadOnly: false })
@@ -1213,7 +1228,7 @@ describe('pipeline', { skip }, () => {
 
     await ingestEvent(
       rig.deps,
-      verification({ userId: ALICE, handle: 'alice', email: 'alice@example.test', verifyUrl: VERIFY_LINK }),
+      verification({ userId: ALICE, handle: 'alice', email: 'alice@cloudsforge.online', verifyUrl: VERIFY_LINK }),
     )
     await dispatchDue(rig.deps, 50)
 
@@ -1242,7 +1257,7 @@ describe('pipeline', { skip }, () => {
 
     await ingestEvent(
       rig.deps,
-      verification({ userId: ALICE, handle: 'alice', email: 'alice@example.test', verifyUrl: VERIFY_LINK }),
+      verification({ userId: ALICE, handle: 'alice', email: 'alice@cloudsforge.online', verifyUrl: VERIFY_LINK }),
     )
 
     const batched = await sql<Array<{ n: number }>>`select count(*)::int as n from digests`
@@ -1271,7 +1286,7 @@ describe('pipeline', { skip }, () => {
         'identity.email.verification_requested',
         BOB,
         // No userId, and BOB on the actor — the shape a resend from another principal would take.
-        { handle: 'alice', email: 'alice@example.test', verifyUrl: VERIFY_LINK },
+        { handle: 'alice', email: 'alice@cloudsforge.online', verifyUrl: VERIFY_LINK },
         { actor: `user:${BOB}` },
       ),
     )
