@@ -82,6 +82,7 @@ import {
   type Db,
   type Tx,
 } from './store.ts'
+import { isUndeliverableAddress } from './reserved.ts'
 import {
   isTemplateId,
   renderTemplate,
@@ -216,7 +217,7 @@ export async function createNotification(
   // suppressed anyway, and — far worse — one per user per re-run of a broadcast fan-out, which is a
   // job that is retried on crash. The series would then be dominated by re-runs rather than by mail
   // failing to arrive, which is the way this signal would have become wallpaper.
-  reportUnaddressed(deps, request, template, available)
+  reportUnaddressed(deps, request, template, available, targets)
 
   deps.metrics.increment(NOTIFICATIONS_TOTAL, {
     category: request.category,
@@ -245,6 +246,12 @@ function channelsAvailable(
   const channels = new Set<Channel>([FLOOR_CHANNEL])
   for (const target of targets) {
     if (allowed !== null && !allowed.includes(target.channel)) continue
+    // An address under a reserved domain has no mail exchanger and never will (see `reserved.ts`).
+    // Skipping it HERE rather than in the adapter is the load-bearing part: the route is never
+    // taken, so no delivery row is written, nothing is retried six times, and nothing is
+    // dead-lettered. The adapter keeps its own guard as a backstop for a row written before this
+    // shipped, but on the live path this line is what stops the allowance being spent.
+    if (target.channel === 'email' && isUndeliverableAddress(target.address)) continue
     channels.add(target.channel)
   }
   return [...channels]
@@ -314,11 +321,18 @@ function reportUnaddressed(
   request: NotificationRequest,
   template: Template,
   available: readonly Channel[],
+  targets: readonly ChannelTarget[],
 ): void {
   if (!deps.emailConfigured) return
   if (available.includes('email')) return
   // A template that may not be delivered by email is not failing to be; it was never going.
   if (template.deliverOn && !template.deliverOn.includes('email')) return
+  // Nor is an address that cannot exist. `channelsAvailable` drops email for a reserved domain, so
+  // without this line every one of the monitor's ~95 registrations an hour would be counted and
+  // logged as a user with no address on file — burying the real signal under synthetic volume at
+  // roughly ninety to one, which is how a warning becomes wallpaper. Nothing failed here: there was
+  // never anybody at the other end.
+  if (targets.some((t) => t.channel === 'email' && isUndeliverableAddress(t.address))) return
 
   deps.metrics.increment(FAILED_TOTAL, { channel: 'email', reason: 'no_address' })
   deps.logger.warn('no email address on file; this notification reaches nobody by mail', {

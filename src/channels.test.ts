@@ -35,7 +35,16 @@ function message(overrides: Partial<OutboundMessage> = {}): OutboundMessage {
     category: 'security',
     priority: 'critical',
     templateId: 'security.key_exported',
-    address: 'alice@example.test',
+    // NOT a reserved domain, and that is now load-bearing rather than incidental. `reserved.ts`
+    // refuses `.test`, `.example`, `.invalid`, `.localhost` and the `example.*` documentation
+    // domains before the transport is opened, so a fixture addressed to `alice@example.test` can no
+    // longer reach the SMTP classification paths this file exists to test — it is rejected first,
+    // and every 4xx/5xx case silently stops testing anything.
+    //
+    // The guarantee that no test ever mails a real person is the `transport` seam, not the domain:
+    // every case here passes a recording transport or none at all. `cloudsforge.online` is the
+    // estate's own domain, so even a mistake has no third party at the other end.
+    address: 'alice@cloudsforge.online',
     secret: null,
     subject: 'A private key left the platform',
     body: 'The private key for a wallet was exported.',
@@ -94,6 +103,30 @@ test('email with no address on file is no_address, and is not retried', async ()
   assert.equal(sent.length, 0, 'nothing was handed to a transport')
 })
 
+test('a reserved domain is rejected permanently and never reaches the transport', async () => {
+  // The assertion that proves no allowance is spent. `deliveries.max_attempts` is 6, so a
+  // retryable answer here would cost six units of a quota real recipients share, per synthetic
+  // account, for an address that can never resolve.
+  const sent: unknown[] = []
+  const adapter = emailAdapter({
+    smtp: { ...UNCONFIGURED, host: 'smtp.example.test', from: 'CloudsForge <no-reply@cloudsforge.online>' },
+    transport: async () => ({
+      async sendMail(m) {
+        sent.push(m)
+        return { messageId: 'never' }
+      },
+    }),
+  })
+
+  // The address the estate's own monitor registers, ~95 times an hour.
+  const outcome = await adapter.send(message({ address: 'beacon+9f2a@beacon.test' }))
+  assert.equal(outcome.ok, false)
+  if (outcome.ok) return
+  assert.equal(outcome.reason, 'rejected')
+  assert.equal(outcome.retryable, false, 'no number of attempts makes a reserved domain resolvable')
+  assert.equal(sent.length, 0, 'nothing was handed to a transport, so nothing was charged')
+})
+
 test('a configured transport is handed a plain-text message and the link', async () => {
   const sent: Array<{ to: string; subject: string; text: string }> = []
   const adapter = emailAdapter({
@@ -108,7 +141,7 @@ test('a configured transport is handed a plain-text message and the link', async
   const outcome = await adapter.send(message())
   assert.deepEqual(outcome, { ok: true, providerRef: '<abc@example.test>' })
   assert.equal(sent.length, 1)
-  assert.equal(sent[0]?.to, 'alice@example.test')
+  assert.equal(sent[0]?.to, 'alice@cloudsforge.online')
   assert.match(sent[0]?.text ?? '', /app\.cloudsforge\.test/)
   // No HTML anywhere. Every template parameter is domain data from an event this service did not
   // write, and an HTML body would make each one an injection surface.

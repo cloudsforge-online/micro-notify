@@ -1112,6 +1112,58 @@ describe('pipeline', { skip }, () => {
   })
 
   /**
+   * The monitor's own accounts, which are what actually exhausted the estate's mail allowance.
+   *
+   * `beacon` registers a throwaway account per synthetic journey at `beacon+<hex>@beacon.test` —
+   * measured at ~95/hour, and 7,319 of mainnet's 7,398 user rows. Every one of them was routed to
+   * email, tried, failed, and retried six times, which spent a 250/day provider allowance within
+   * minutes. After that a real visitor's verification mail returned `SMTP 535` and their address
+   * could never be confirmed: 4,483 tokens issued across the two networks, none ever consumed.
+   */
+  test('an address under a reserved domain is not routed to email at all', async () => {
+    const rig = testRig(sql, { emailConfigured: true })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'beacon+9f2a@beacon.test' })
+
+    await ingestEvent(
+      rig.deps,
+      registeredEvent('custody.key.exported', ALICE, { user_id: ALICE, key_id: 'key-1' }),
+    )
+    await dispatchDue(rig.deps, 50)
+
+    // No delivery row was ever written, which is the load-bearing claim: not "it failed cheaply"
+    // but "it was never attempted". A row would be retried `max_attempts` times and then
+    // dead-lettered, and it is that multiplier that turned one monitor into a quota outage.
+    const rows = await sql<Array<{ n: number }>>`
+      select count(*)::int as n from deliveries where channel = 'email'
+    `
+    assert.equal(rows[0]?.n, 0, 'no email delivery row exists for an address that cannot resolve')
+    assert.equal(rig.adapters.email.sent.length, 0, 'the transport was never opened')
+
+    // The notification itself still happened. Suppressing the CHANNEL is the fix; suppressing the
+    // notification would blind the monitor to fix the monitor's side effect.
+    assert.ok(rig.adapters.in_app.sent.length >= 1, 'the floor channel is unconditional')
+  })
+
+  test('a reserved domain is not reported as a user with no address on file', async () => {
+    // Without this, edit 2 makes `reportUnaddressed` fire for every one of beacon's ~95 an hour,
+    // burying the real signal — an account that genuinely has no address — at roughly ninety to
+    // one. Nothing failed here: there was never anybody at the other end.
+    const rig = testRig(sql, { emailConfigured: true })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'beacon+9f2a@beacon.test' })
+
+    await ingestEvent(
+      rig.deps,
+      registeredEvent('custody.key.exported', ALICE, { user_id: ALICE, key_id: 'key-1' }),
+    )
+
+    assert.equal(
+      counterValue(rig.metrics, 'notify_failed_total', { channel: 'email', reason: 'no_address' }),
+      0,
+      'an unroutable address is not the same finding as a missing one',
+    )
+  })
+
+  /**
    * The link is a single-use credential, and this is every route it could have left by.
    *
    * It arrives on an event, is stored in `notifications.params`, and goes out in a mail body. The
