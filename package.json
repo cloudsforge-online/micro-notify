@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/notify",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "description": "The platform-wide notification service: event to notification mapping, preferences, templates, dedupe, digests, retries, delivery history, operator broadcasts, and developer webhooks as one pipeline.",
   "license": "MIT",
@@ -21,7 +21,7 @@
   "_runtimeDependencies": [
     "Siblings are consumed as link: rather than file:. A file: path PACKS the directory and honours",
     "'files': ['dist'], which installs a package whose exports point at src/index.ts while src/ was",
-    "never copied \u2014 the import then fails at runtime with a module-not-found that names a path",
+    "never copied — the import then fails at runtime with a module-not-found that names a path",
     "inside node_modules. link: symlinks the working tree, so the unbuilt TypeScript sources these",
     "packages currently export actually resolve.",
     "nodemailer is a runtime dependency and is imported LAZILY, only once SMTP_HOST is set. An",
