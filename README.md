@@ -130,14 +130,70 @@ database tests do not run, and CI fails a build whose suite skipped them.
 
 ## Known gaps
 
-- **`devplatform.*` is not a registered topic**, so developer-webhook events from the developer
-  platform are acknowledged and ignored rather than delivered. Recorded in
-  `docs/ecosystem/18-build-status.md` §3.3.
+- **~~`devplatform.*` is not a registered topic.~~ It is, and this service handles it — what is
+  still missing is a producer that has ever sent one.** The claim came from
+  `docs/ecosystem/18-build-status.md` §3.3, which recorded it as one of three smaller findings, and
+  both halves of it have since stopped being true. `micro-contracts` registers
+  `devplatform.key.issued` and `devplatform.key.revoked` in
+  `contracts/packages/events/src/index.ts`, with `devplatform` in the `ProducerService` union, so
+  `makeEvent` builds them. This repository then does the consumer half in full: `src/catalogue.ts`
+  carries a rule for each, both `category: 'api'` and `priority: 'high'`, and `src/templates.ts`
+  carries the `api.key_issued` and `api.key_revoked` bodies they render. `src/catalogue.test.ts`
+  asserts both topics are mapped, and `src/topics.ts`'s `AWAITING_REGISTRATION` quarantine — which
+  held exactly these two while contracts caught up — is empty again. Nothing is acknowledged and
+  ignored.
+
+  What is true is narrower and worth keeping: **no `devplatform.*` event has ever arrived.** The
+  estate's `notify` database holds zero `inbox` rows on any `devplatform` topic against 15,265
+  total, so the rules and templates above are untested by traffic rather than proven by it. And one
+  path is designed to notify nobody, which is a decision rather than an oversight: the
+  organisation-erasure route in `devplatform` revokes every live key an organisation holds as the
+  actor `service:identity`, and `forUser` in `src/catalogue.ts` answers `no_recipient` for a
+  `service:` actor because guessing would tell the wrong person their credentials changed. The
+  payload names a key and a project, never an owner, and this service holds no project-membership
+  table to look one up in. The repair is one field from the producer (`api_keys.created_by`, already
+  on the row `revokeOrgKeys` updates) and is filed against `micro-devplatform`, not worked around
+  here. `src/catalogue.ts` carries the long form of the argument.
 - **`/metrics` is unauthenticated**, as on every service here except `micro-beacon`, which gates its
   equivalent. Nothing in this repository says whether that divergence is deliberate; today it rests
   on the assumption that the metrics port is not routed publicly. The gateway's public map
   (`micro-deploy`) does not route it.
-- **Nothing is deployed.** This service has never run against a persistent database outside a test.
+- **~~Nothing is deployed.~~ It is deployed and it has run against a persistent database for a long
+  time — but "deployed" and "delivering mail" are two claims, and only the first one holds.**
+  `deploy/compose/docker-compose.estate.yml` builds this repository twice: `notify-migrate`, from
+  build context `../../notify`, running `src/migrator.ts` once under `restart: "no"` and waiting on
+  `postgres: service_healthy`; and `notify` itself, gated behind
+  `notify-migrate: service_completed_successfully` and `identity: service_healthy`, published on
+  `127.0.0.1:4110`, with `NOTIFY_DATABASE_URL` pointing at `postgres:5432/notify` and
+  `INSTANCE_ID: notify-estate`. Its healthcheck is the estate's shared `*healthcheck` anchor, which
+  probes **`/readyz` rather than `/livez`** — deliberately, since liveness answers while the
+  database is unreachable, and that is the whole distinction the two endpoints exist to draw. So
+  the schema in `src/migrations.ts` is applied to a real database by a real one-shot process, and
+  the service is not counted up until it can reach it.
+
+  The estate bears that out: the container reports healthy, and the persistent `notify` database
+  holds 15,265 `inbox` rows, 15,204 `notifications`, 16,596 `deliveries` and 7,603 email
+  `channel_targets` — orders of magnitude past anything a truncating test suite produces.
+
+  **The gap that replaces this one is deliverability, not deployment.** Every one of the 15,204
+  in-app deliveries is `sent`; email is 344 `sent` against 1,048 `dead`, and the recorded
+  `last_error` on all 1,048 is `SMTP 535`. That is not the "unconfigured is a supported mode" branch
+  described under Configuration — the compose block defaults every `SMTP_*` value to empty
+  (`${SMTP_HOST:-}`) so a local drill needs rows rather than emails, but the estate does supply
+  them, from a gitignored `compose/estate/tokens.env` that Compose loads as `compose/.env`. The host
+  is set, the credentials authenticate, and the transactional mail provider behind them is on a free
+  tier with a low daily cap that synthetic registration traffic from `micro-beacon` exhausts. A 535
+  here is therefore a quota refusal wearing an authentication status code, and reading it as broken
+  credentials sends you to the wrong file. Note also that `SMTP_SECURE` means *implicit* TLS and is
+  port 465 only; setting it on 587, which is the port the estate uses, makes the connection fail
+  rather than harden it.
+
+  Two things follow for anyone reading the delivery table. The dead rows are concentrated on
+  accounts that no person owns — the estate has no real users yet, and the volume above is beacon
+  and test residue — so this is a cold-start defect rather than an outage. And the failure is
+  contained exactly where the design says it should be: a dead email delivery is recorded in
+  `deliveries` with its attempts and its error, the in-app feed for the same notification is
+  `sent`, and nothing upstream of `/ingest` failed because of it.
 
 ---
 
