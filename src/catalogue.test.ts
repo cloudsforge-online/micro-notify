@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { test } from 'node:test'
+import { RETIRED_ASSETS } from '@cloudsforge/contracts-chain'
 import { TOPIC_NAMES, isRegisteredTopic } from '@cloudsforge/contracts-events'
 import {
   MAPPED_TOPICS,
@@ -485,20 +486,140 @@ test('provision.failed notifies the SUBJECT, and the service actor never becomes
   })
 })
 
-test('emberkin.reward.granted names the Shards and dedupes on the journal entry', () => {
-  const event = registeredEvent('emberkin.reward.granted', 'season-1:' + ALICE, {
-    seasonId: 'season-1',
-    userId: ALICE,
-    reason: 'season placement',
-    amount: '250',
-    journalEntryId: 'j-9',
+/**
+ * **The test that used to be here is the reason the defect survived.**
+ *
+ * It was called "emberkin.reward.granted names the Shards" and it asserted, exactly:
+ *
+ *     assert.equal(set.recipients[0].params['rewardName'], '250 Shards')
+ *
+ * `catalogue.ts` built that parameter as `` `${amount} Shards` ``, so "You earned 250 Shards in
+ * Emberkin." was delivered in app and by mail — naming SHARD, which is retired
+ * (`RETIRED_ASSETS = Object.freeze(['SHARD'])`, `contracts/packages/chain/src/index.ts`). The
+ * assertion did not merely fail to catch that. It PINNED it: correcting the copy turned the suite
+ * red, so the defect was the green state and every reader was told the sentence was intended.
+ * micro-org #227 is the sweep that found it, and this row is one of seven repositories.
+ *
+ * The three tests below are what a pinned literal should have been all along:
+ *
+ *   1. with no asset code on the event — which is every real event today — no unit is rendered at
+ *      all, and BOTH reward rules render the same thing, because they now share `rewardNameOf`;
+ *   2. with an asset code on the event, the code is rendered and it is the one the payload named,
+ *      proving the unit is derived rather than chosen here;
+ *   3. nothing either rule can produce names a wound-down asset — and that assertion reads
+ *      `RETIRED_ASSETS` rather than the word "Shards", so it is bound to the estate's list and
+ *      extends itself the next time an asset is retired.
+ *
+ * Payloads are the producers' real ones: `emberkin/src/seasons.ts` (`grantSeasonReward`) and
+ * `worlds/src/rewards.ts` (`grantReward`).
+ */
+
+/** The two reward rules and one real payload each, as their producers emit them. */
+const REWARD_EVENTS = [
+  {
+    topic: 'emberkin.reward.granted',
+    dedupeKey: 'emberkin.reward:j-9',
+    // emberkin/src/seasons.ts — `{ seasonId, userId, reason, amount, journalEntryId }`. No asset.
+    payload: {
+      seasonId: 'season-1',
+      userId: ALICE,
+      reason: 'season placement',
+      amount: '250',
+      journalEntryId: 'j-9',
+    } as Record<string, unknown>,
+    key: 'season-1:' + ALICE,
+  },
+  {
+    topic: 'worlds.reward.granted',
+    dedupeKey: 'reward.granted:grant-7',
+    // worlds/src/rewards.ts — the amount arrives as `amountShards` and, again, no asset code.
+    payload: {
+      rewardId: 'grant-7',
+      seasonId: 'season-1',
+      titleId: 'title-3',
+      userId: ALICE,
+      reason: 'objective:first-build',
+      amountShards: '250',
+      journalEntryId: 'j-9',
+      budgetRemainingShards: '9750',
+    } as Record<string, unknown>,
+    key: 'grant-7',
+  },
+] as const
+
+test('a reward whose event does not name an asset is named without a unit, in both rules', () => {
+  const rendered: string[] = []
+  for (const each of REWARD_EVENTS) {
+    const event = registeredEvent(each.topic, each.key, each.payload)
+    const set = RULES[each.topic]?.recipients(event)
+    assert.equal(set?.kind, 'recipients', `${each.topic} notified nobody`)
+    if (set?.kind !== 'recipients') return
+    assert.equal(set.recipients[0].userId, ALICE)
+    assert.equal(set.recipients[0].dedupeKey, each.dedupeKey)
+    rendered.push(String(set.recipients[0].params['rewardName']))
+  }
+  // The named hole, not a bare number. Neither producer says which asset the reward is in — both
+  // credit SHARD at the ledger (`rewardPostings`) and neither puts that on the event — so "250"
+  // on its own would be a quantity the reader supplies their own unit for. `/play/rewards`, which
+  // is this template's `path`, is where the figure lives, denominated by the service that owns it.
+  assert.deepEqual(rendered, ['a reward', 'a reward'])
+})
+
+test('a reward whose event DOES name an asset renders that asset code, derived', () => {
+  // Dead against today's payloads and written anyway: this is the branch that makes the fix
+  // outlive the re-denomination in micro-org #226. The day either producer adds `asset_code`, the
+  // notification starts naming it with no edit to catalogue.ts — which is the whole point of not
+  // having typed a unit into it. The code below is EMBER only because the payload here says EMBER;
+  // change the payload and the assertion has to change with it.
+  for (const each of REWARD_EVENTS) {
+    const event = registeredEvent(each.topic, each.key, { ...each.payload, asset_code: 'EMBER' })
+    const set = RULES[each.topic]?.recipients(event)
+    assert.equal(set?.kind, 'recipients')
+    if (set?.kind !== 'recipients') return
+    assert.equal(set.recipients[0].params['rewardName'], '250 EMBER', each.topic)
+  }
+  // …and it is genuinely read off the payload rather than being a second hard-coded string.
+  const event = registeredEvent(REWARD_EVENTS[0].topic, REWARD_EVENTS[0].key, {
+    ...REWARD_EVENTS[0].payload,
+    assetCode: 'BTC',
   })
-  const set = RULES['emberkin.reward.granted']?.recipients(event)
+  const set = RULES[REWARD_EVENTS[0].topic]?.recipients(event)
   assert.equal(set?.kind, 'recipients')
   if (set?.kind !== 'recipients') return
-  assert.equal(set.recipients[0].userId, ALICE)
-  assert.equal(set.recipients[0].dedupeKey, 'emberkin.reward:j-9')
-  assert.equal(set.recipients[0].params['rewardName'], '250 Shards')
+  assert.equal(set.recipients[0].params['rewardName'], '250 BTC')
+})
+
+test('no reward notification names a retired asset, whatever the event carries', () => {
+  // Bound to RETIRED_ASSETS rather than to the word "Shards": the list is the thing this defends,
+  // and an assertion that names the asset itself would need editing on the day EMBER is wound
+  // down — which is exactly the day it would need to still work. Matched case-insensitively
+  // because the copy said "Shards", not "SHARD", and a case-sensitive check on the asset code
+  // would have passed straight over the original defect.
+  assert.ok(RETIRED_ASSETS.length > 0, 'no retired assets — this test would pass vacuously')
+  const retired = RETIRED_ASSETS.map((code) => new RegExp(code, 'i'))
+  for (const each of REWARD_EVENTS) {
+    // Second payload: the producer sends the retired code EXPLICITLY. Passing it through would be
+    // arguable — it is what the ledger recorded, which is why `ledger.entry.posted` renders
+    // whatever `asset_code` it is given and `mint-web/src/lib/format.ts` deliberately shows a
+    // pre-migration order as "2,500 SHARD" — but a reward is news about something a player has
+    // just been given, in an asset the estate is winding down. `rewardNameOf` refuses it and falls
+    // back to the named hole; this is the assertion that says so.
+    for (const payload of [each.payload, { ...each.payload, asset_code: 'SHARD' }]) {
+      const set = RULES[each.topic]?.recipients(registeredEvent(each.topic, each.key, payload))
+      assert.equal(set?.kind, 'recipients')
+      if (set?.kind !== 'recipients') return
+      const params = set.recipients[0].params
+      for (const name of templateFor('reward.granted').params) {
+        for (const pattern of retired) {
+          assert.doesNotMatch(
+            String(params[name]),
+            pattern,
+            `${each.topic} renders a retired asset into ${name}`,
+          )
+        }
+      }
+    }
+  }
 })
 
 

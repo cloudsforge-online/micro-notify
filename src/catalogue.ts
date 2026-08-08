@@ -51,6 +51,7 @@
  * thought about therefore fails this service's build rather than silently notifying nobody.
  */
 
+import { RETIRED_ASSETS } from '@cloudsforge/contracts-chain'
 import { TOPICS, type TopicName } from '@cloudsforge/contracts-events'
 import type { Category, Channel, Priority } from './model.ts'
 import type { TemplateId } from './templates.ts'
@@ -443,6 +444,108 @@ export function formatInstant(iso: string): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return iso
   return `${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`
+}
+
+/**
+ * What a reward notification calls the thing that was earned. Shared by BOTH reward rules.
+ *
+ * ## The defect this replaces, and why the suite was green through all of it
+ *
+ * `emberkin.reward.granted` built this parameter as `` `${amount} Shards` `` — the unit typed
+ * straight into the copy — so `reward.granted` ("You earned {{rewardName}} in {{titleName}}.",
+ * `templates.ts`) delivered "You earned 250 Shards in Emberkin." in app and by mail.
+ *
+ * SHARD is RETIRED: `RETIRED_ASSETS = Object.freeze(['SHARD'])`,
+ * `contracts/packages/chain/src/index.ts:58`, whose own comment is that nothing may be **newly**
+ * denominated in it. Naming it to a player is the third time a retired asset has reached a user
+ * surface (micro-org #15, #182, and #227, of which this is one row).
+ *
+ * The reason review never caught it is the more useful half. `catalogue.test.ts` asserted
+ * `params['rewardName'] === '250 Shards'`, exactly, under the name "names the Shards" — so the
+ * suite was green **because** of the defect and any correction to the copy failed a test. A test
+ * that pins a literal is only worth having when the literal is the property being defended, and
+ * the property here is the opposite one: that no unit is ever written down in this repository.
+ * That test is gone; what replaced it pins derivation and pins the absence of a retired code
+ * against `RETIRED_ASSETS` itself, so this cannot come back without the suite saying so.
+ *
+ * ## What is actually on the wire — read from both producers, not assumed
+ *
+ *   - `emberkin/src/seasons.ts` (`grantSeasonReward`) emits
+ *     `{ seasonId, userId, reason, amount, journalEntryId }`.
+ *   - `worlds/src/rewards.ts` (`grantReward`) emits `{ rewardId, seasonId, titleId, userId,
+ *     reason, amountShards, journalEntryId, budgetRemainingShards }`.
+ *
+ * **Neither payload carries an asset code.** Both services do post `assetCode: 'SHARD'` when they
+ * credit the player (`rewardPostings` in `emberkin/src/ledgerclient.ts` and
+ * `worlds/src/ledgerclient.ts`), so the *ledger* knows the denomination — but that fact is not on
+ * the event, notify is a bus consumer with no ledger client, and it cannot join to one. Writing
+ * `EMBER` here instead would be the same class of error as `Shards`, one step further from the
+ * evidence: a unit this service picked on behalf of the service that moved the money. Where the
+ * engagement programmes re-denominate is #226, and it is theirs to decide, not this file's.
+ *
+ * ## Which is why an amount is only ever shown together with the unit it is in
+ *
+ * "You earned 250 in Emberkin" is not a smaller version of the truth; it is a number the reader
+ * supplies their own unit for, and it is the shape this codebase calls a plausible screen over
+ * nothing. The honest answer to "how much of what", when the event does not say what, is to name
+ * the reward without a quantity and let the template's own `path` — `/play/rewards` — carry the
+ * figure, on the surface owned by the service that denominated it.
+ *
+ * So the order is: a name the producer sent; else an amount **and** an asset code the producer
+ * sent; else the named hole. The middle branch is dead against both of today's payloads and is
+ * written anyway, because it is what makes this outlive the re-denomination — the day either
+ * producer puts `asset_code` on its event, both notifications begin reading "250 EMBER" with no
+ * edit here, and no unit will ever have been typed into this repository to get there.
+ *
+ * ## The one asset code that is refused even when the producer does send it
+ *
+ * `RETIRED_ASSETS` is consulted on the delivery path, and a retired code falls back to the named
+ * hole along with its amount. That is a judgement and it is worth stating: elsewhere in this file
+ * rendering SHARD is CORRECT — `ledger.entry.posted` passes through whatever `asset_code` the
+ * ledger recorded, and `mint-web/src/lib/format.ts` deliberately shows a pre-migration order as
+ * "2,500 SHARD", because both are describing a past fact that really is denominated that way. A
+ * reward is not that. It is news about something a player has just been given, in an asset the
+ * estate is winding down, and #227 exists because that distinction was not being drawn anywhere.
+ *
+ * The guard is the estate's LIST, not the string "SHARD", so it extends itself the next time an
+ * asset is retired — which is the only version of it that is still working in a year.
+ *
+ * ## And why it is one function rather than two rules that happen to agree
+ *
+ * The two rules were inconsistent, which is part of what #227 reports: emberkin appended a unit
+ * and `worlds.reward.granted` appended none. Neither was a decision; each was what its author
+ * wrote on the day. One function is how the answer stays decided in one place, and it is also how
+ * `worlds.reward.granted` gets the same asset-code branch for free — it had no amount at all
+ * before, because it read `reward_name`/`rewardName`/`name` and worlds sends none of the three.
+ */
+export function rewardNameOf(payload: Record<string, unknown>): string {
+  // A name a producer really sent beats a quantity: "the Ashen Blade" is the reward, and the
+  // amount beside it would be a second thing. Kept from the worlds rule, which read exactly these
+  // three spellings — see the note above about none of them being on the wire today.
+  const named = str(payload, ['reward_name', 'rewardName', 'name'], '')
+  if (named) return named
+  // `amount` is emberkin's spelling, `amountShards`/`amount_shards` is worlds'. Reading a field
+  // whose NAME says shards is not the same as writing shards into copy: the field name is the
+  // producer's wire contract and is not read by anybody, the copy is.
+  const amount = str(payload, ['amount', 'amount_shards', 'amountShards'], '')
+  const asset = str(payload, ['asset_code', 'assetCode', 'asset'], '')
+  if (amount && asset && !isRetired(asset)) return `${amount} ${asset}`
+  return 'a reward'
+}
+
+/**
+ * Is this payload's asset code one the estate is winding down?
+ *
+ * The list rather than contracts' own `isRetiredAsset` (`contracts/packages/chain/src/index.ts:71`),
+ * and the difference is the argument: that helper takes an `AssetCode`, and this string came off a
+ * payload. Narrowing it first would need a validator whose only possible verdict on an unknown
+ * code is "not retired" — the right answer, reached by a longer route, with a second place for the
+ * two lists to disagree. Upper-cased because a producer's spelling is not this service's to
+ * assume, and `RETIRED_ASSETS` holds the canonical casing.
+ */
+function isRetired(asset: string): boolean {
+  const code = asset.toUpperCase()
+  return (RETIRED_ASSETS as readonly string[]).includes(code)
 }
 
 /**
@@ -1290,15 +1393,27 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
       }
     },
   }),
+  /* --------------------------------------------------------- rewards, and their one unit
+   *
+   * Both rules below name what was earned through `rewardNameOf`, whose comment carries the whole
+   * argument: what each producer really puts on the wire, why neither of them says which asset the
+   * reward is in, and why that means no unit is written down here. It is shared rather than
+   * duplicated because these two used to disagree — one appended "Shards", the other appended
+   * nothing — and neither disagreement was a decision anybody made.
+   */
   'emberkin.reward.granted': Object.freeze({
     category: 'reward',
     priority: 'normal',
     templateId: 'reward.granted',
-    why: 'Same reasoning as worlds.reward.granted: Shards were earned, and a reward nobody was told about does not bring the player back.',
+    why: 'Same reasoning as worlds.reward.granted: a reward nobody was told about does not bring the player back.',
     recipients: forUser(
       (event) => `emberkin.reward:${str(event.payload, ['journalEntryId', 'journal_entry_id'], event.key)}`,
       (event) => ({
-        rewardName: `${str(event.payload, ['amount'], 'a reward of')} Shards`,
+        rewardName: rewardNameOf(event.payload),
+        // The title, spelled once, because this topic has exactly one producer and it is the
+        // Emberkin service (`emberkin/src/seasons.ts`). A product name is neither a figure nor an
+        // asset code, so it is not what `rewardNameOf` forbids — and reading it off a payload that
+        // does not carry it would only produce a fallback that says less.
         titleName: 'Emberkin',
       }),
       () => 'cf:emberkin:reward',
@@ -1312,7 +1427,14 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     recipients: forUser(
       (event) => `reward.granted:${str(event.payload, ['reward_id', 'rewardId'], event.id)}`,
       (event) => ({
-        rewardName: str(event.payload, ['reward_name', 'rewardName', 'name'], 'a reward'),
+        rewardName: rewardNameOf(event.payload),
+        // `title_name`/`titleName`/`title` are read and none of them is sent: `worlds/src/rewards.ts`
+        // puts `titleId` on the event and nothing else about the title. So this is "a game" on
+        // every real delivery today, and it is left that way deliberately — the alternative on
+        // hand is `titleId`, and "You earned a reward in 0f6c…" names the row rather than the game.
+        // Making it say the title's name is a change to the PRODUCER (put the name on the event),
+        // not a lookup this consumer should grow; recorded here so the next reader does not
+        // rediscover it by testing the fallback and finding it fires every time.
         titleName: str(event.payload, ['title_name', 'titleName', 'title'], 'a game'),
       }),
       (event) => `cf:worlds:reward:${str(event.payload, ['reward_id', 'rewardId'], event.id)}`,

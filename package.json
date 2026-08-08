@@ -26,10 +26,15 @@
     "packages currently export actually resolve.",
     "nodemailer is a runtime dependency and is imported LAZILY, only once SMTP_HOST is set. An",
     "unconfigured transport is a supported mode (see src/email.ts), so the module must not be",
-    "needed to boot a deployment that sends no mail."
+    "needed to boot a deployment that sends no mail.",
+    "@cloudsforge/contracts-chain is a RUNTIME dependency, not a dev one, and the reason is that",
+    "catalogue.ts asks it a question on the delivery path: isRetiredAsset(), so that no rule can",
+    "render a wound-down asset code into copy a person reads. It is the list itself rather than a",
+    "hard-coded 'SHARD', so the guard extends the day another asset is retired. micro-org #227."
   ],
   "dependencies": {
     "@cloudsforge/auth": "link:../runtime/packages/auth",
+    "@cloudsforge/contracts-chain": "link:../contracts/packages/chain",
     "@cloudsforge/contracts-events": "link:../contracts/packages/events",
     "@cloudsforge/db": "link:../runtime/packages/db",
     "@cloudsforge/http": "link:../runtime/packages/http",
