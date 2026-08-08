@@ -29,6 +29,7 @@
 
 import type { SmtpConfig } from './env.ts'
 import { failure, type ChannelAdapter, type OutboundMessage, type SendOutcome } from './channels.ts'
+import { isUndeliverableAddress } from './reserved.ts'
 
 /** The slice of nodemailer this adapter uses. Narrow, so the lazy import stays typed. */
 interface Transport {
@@ -82,6 +83,16 @@ export function emailAdapter(options: EmailOptions): ChannelAdapter {
       }
       if (!message.address) {
         return failure('no_address', false, 'no email address on file for this user')
+      }
+      // Backstop. `pipeline.ts`'s `channelsAvailable` already declines to route email to a domain
+      // the standards reserve, so on the live path no delivery reaches here — this catches a row
+      // written before that shipped, or a caller that builds an OutboundMessage some other way.
+      //
+      // Permanent, not retryable, and that is the whole point: no number of attempts makes
+      // `beacon.test` resolvable, `deliveries.max_attempts` is 6, and each of those six is a unit of
+      // an allowance real recipients share. Retrying here is how one synthetic account costs six.
+      if (isUndeliverableAddress(message.address)) {
+        return failure('rejected', false, 'reserved domain; no mail exchanger can exist (RFC 6761 §6, RFC 2606 §3)')
       }
 
       try {
