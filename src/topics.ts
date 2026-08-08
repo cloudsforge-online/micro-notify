@@ -225,39 +225,28 @@ export interface ProposedTopic {
  * being kept deliberately: the lesson above is that a PRODUCER deployed ahead of its contract is
  * the thing that reaches users, so this consumer's rule and the producer's emit go out together and
  * the registry entry is the one piece owned by another repository.
+ *
+ * ── AND IT IS EMPTY AGAIN. `identity.password.reset_requested` was registered on 2026-08-08. ────
+ *
+ * `micro-contracts` adopted it from identity's quarantine spec, `adoptedProposals()` turned
+ * non-empty, this suite went red, and the entry is deleted. Fourth time, same three steps, no
+ * argument required — which is the property this table is for.
+ *
+ * The order the paragraph above says was being kept deliberately WAS kept, and it is worth being
+ * precise about what that bought, because it is not what the verification incident would suggest.
+ * Nothing broke and nobody noticed: the rule here and the emit in identity agreed for the whole
+ * life of the feature, because both were pasted from the same quarantine spec. What the missing
+ * registry entry cost was invisible instead — an unregistered topic fails `validateEnvelope`, so
+ * `activity/src/ingest.ts` took its unregistered branch and filed every reset as
+ * `unclassified` / `internal` with 90-day quarantine retention rather than the 730 days a security
+ * record gets. The estate was deleting its own account-recovery trail early, in a third repository
+ * neither of the two that agreed had any reason to look at.
+ *
+ * So the lesson is not "keep the producer behind the contract" alone. It is that two repositories
+ * agreeing is not the same as the estate agreeing, and only an estate-wide check can tell the
+ * difference — `org/tools/estate-topics.mjs` is the one that found this. micro-org#263.
  */
-export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({
-  /**
-   * The password reset mail, and the sibling of `identity.email.verification_requested` in every
-   * respect that matters — same producer, same key, same `secretParams` treatment at the far end.
-   *
-   * The spec below is copied VERBATIM from `identity/src/topics.ts`'s own quarantine entry, so
-   * `micro-contracts` adopting it is a paste from either side and the two repositories cannot
-   * propose two different contracts for one topic.
-   *
-   * **Read this before deciding the payload should not carry `reset_url`.** #184 is open against
-   * the verification topic for carrying a live credential on the bus, and its remedy — emit a
-   * reference and redeem the link at send time — is right there and impossible here: identity
-   * stores the reset token only as its SHA-256, so it cannot serve the link back later, and
-   * reference-and-redeem would mean retaining the raw token in the credential table for ever
-   * instead of the URL sitting in a row for thirty minutes. The TTL is what bounds this one, and at
-   * thirty minutes it is 1/48th of the verification token's — which is #184's own second remedy,
-   * applied here from the day the producer was written.
-   */
-  'identity.password.reset_requested': Object.freeze({
-    reason:
-      "The only event that asks anybody to send a password reset. Until it existed `deliverPasswordReset` hard-returned `{ delivered: false, channel: 'none' }`, so `POST /auth/password/forgot` answered 202, recorded the token and sent nothing at all — a user who forgot their password depended on an operator noticing a warn line and issuing the link by hand. It is keyed and shaped as the sibling of identity.email.verification_requested so notify's rule for it is the same rule: it carries the address, so it is also the event from which a consumer can learn where to reach an account that predates verification.",
-    emittedAt: 'identity/src/passwordReset.ts:288',
-    spec: Object.freeze({
-      producer: 'identity',
-      payloadType: 'PasswordResetRequested',
-      version: '1.0',
-      keyedBy: 'user_id',
-      description:
-        'A single-use password reset link has been minted for an account. Carries the address and the link, which expires in thirty minutes and works once.',
-    }),
-  }),
-})
+export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({})
 
 /**
  * An AD-08 notification this service cannot produce, and the ONE reason why.
