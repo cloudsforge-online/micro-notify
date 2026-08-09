@@ -583,6 +583,28 @@ export async function markDeliverySent(
  *     be retried" is one two queries will disagree about.
  *   - **retryable, budget spent** → `dead`. Retained, because the row is the only durable record
  *     that this was requested and never done, and an operator needs to find it.
+ *
+ * ## The fourth outcome: a failure that is not this delivery's fault
+ *
+ * `consumesAttempt: false` refunds the attempt `claimDeliveries` charged, so the row waits without
+ * moving towards `dead`. Exactly one caller passes it — `quota_exhausted`, in `dispatchDue` — and
+ * the reasoning is in `model.ts`: the attempt budget measures how many times THIS message has been
+ * refused, and a provider that has run out of allowance has not looked at this message at all. It
+ * would refuse an empty one identically.
+ *
+ * Before this existed the arithmetic was decisive rather than marginal. `max_attempts` is 6, the
+ * shared backoff is `min(1s · 2^(n-1), 5min)` with jitter, so six attempts are spent in about
+ * thirty seconds — against a DAILY allowance. Every message written into an exhausted window was
+ * therefore dead-lettered before the window could clear, which is how 707 messages were lost on
+ * 2026-08-05 (micro-org#201) and why micro-org#243 ends "no real address can ever be verified".
+ *
+ * **The refund is bounded, and the bound is the allowance's own period.** After
+ * `QUOTA_WAIT_LIMIT`, attempts are charged normally again and the delivery dead-letters like
+ * anything else. A refund with no bound is a row that retries for ever and never appears in the
+ * dead-letter view — a message quietly not delivered, which is the failure mode this whole service
+ * is written against. Twenty-five hours rather than twenty-four: an allowance that resets on the
+ * provider's clock, in the provider's timezone, must be given one full cycle plus room for the two
+ * clocks to disagree, or a delivery dies an hour before the reset it was waiting for.
  */
 export async function markDeliveryFailed(
   sql: Db,
@@ -592,29 +614,52 @@ export async function markDeliveryFailed(
     readonly retryable: boolean
     readonly detail: string
     readonly backoffMs: number
+    /** Default true. See the note above; only `quota_exhausted` passes false. */
+    readonly consumesAttempt?: boolean
   },
 ): Promise<DeliveryState> {
+  const consumes = input.consumesAttempt ?? true
   const rows = await sql<{ state: string }[]>`
-    update deliveries
+    with target as (
+      -- Computed once and joined in, because it is read three times below and a repeated
+      -- expression is how two of the three end up disagreeing after an edit.
+      select id,
+             (${consumes} = false and created_at > now() - ${QUOTA_WAIT_LIMIT}::interval) as refunded
+        from deliveries
+       where id = ${id}
+    )
+    update deliveries d
        set leased_by = null,
            leased_until = null,
            reason = ${input.reason},
            last_error = ${input.detail.slice(0, 2_000)},
+           attempts = case when t.refunded then greatest(d.attempts - 1, 0) else d.attempts end,
            state = case
                      when ${input.retryable} = false then 'undeliverable'
-                     when attempts >= max_attempts then 'dead'
+                     when t.refunded then 'pending'
+                     when d.attempts >= d.max_attempts then 'dead'
                      else 'pending'
                    end,
            next_attempt_at = case
-                     when ${input.retryable} = true and attempts < max_attempts
+                     when ${input.retryable} = true and (t.refunded or d.attempts < d.max_attempts)
                        then now() + (${String(input.backoffMs)} || ' milliseconds')::interval
-                     else next_attempt_at
+                     else d.next_attempt_at
                    end
-     where id = ${id}
-    returning state
+      from target t
+     where d.id = t.id
+    returning d.state
   `
   return (rows[0]?.state ?? 'pending') as DeliveryState
 }
+
+/**
+ * How long a delivery may keep refusing to spend its attempt budget on an exhausted allowance.
+ *
+ * One provider day plus an hour of clock slack — see `markDeliveryFailed`. A Postgres interval
+ * literal rather than a number of milliseconds, so the comparison happens in the database's own
+ * clock alongside `now()`, which is the clock every other timestamp in this table was written by.
+ */
+const QUOTA_WAIT_LIMIT = '25 hours'
 
 export interface DeliveryHistoryRow {
   readonly id: string
@@ -709,19 +754,49 @@ export async function listDeliveries(
 }
 
 /** For `notify_deadletter_total` and the readiness of an operator to be told about a backlog. */
-export async function deliveryStats(
-  sql: Db,
-): Promise<{ pending: number; dead: number; undeliverable: number; overdue: number }> {
+export async function deliveryStats(sql: Db): Promise<{
+  pending: number
+  dead: number
+  undeliverable: number
+  overdue: number
+  /**
+   * Deliveries parked because the provider's allowance is spent.
+   *
+   * Derived from the table at scrape time rather than held as a flag a dispatcher sets, and that
+   * is the point: a flag is per-replica, is lost on restart, and answers "did I see a refusal
+   * recently" when the question an operator has is "**can a real person be verified right now**".
+   * A count above zero says no, and says it whichever replica saw the refusal.
+   *
+   * Not filtered to `channel = 'email'`. The allowance is the mail provider's, so email is the
+   * only channel that can produce this reason today — and pinning the metric to that assumption
+   * would quietly stop counting the day an SMS gateway starts metering too.
+   */
+  awaitingAllowance: number
+}> {
   const rows = await sql<
-    Array<{ pending: number; dead: number; undeliverable: number; overdue: number }>
+    Array<{
+      pending: number
+      dead: number
+      undeliverable: number
+      overdue: number
+      awaiting_allowance: number
+    }>
   >`
     select count(*) filter (where state = 'pending')::int as pending,
            count(*) filter (where state = 'dead')::int as dead,
            count(*) filter (where state = 'undeliverable')::int as undeliverable,
-           count(*) filter (where state = 'pending' and next_attempt_at < now() - interval '5 minutes')::int as overdue
+           count(*) filter (where state = 'pending' and next_attempt_at < now() - interval '5 minutes')::int as overdue,
+           count(*) filter (where state = 'pending' and reason = 'quota_exhausted')::int as awaiting_allowance
       from deliveries
   `
-  return rows[0] ?? { pending: 0, dead: 0, undeliverable: 0, overdue: 0 }
+  const row = rows[0]
+  return {
+    pending: row?.pending ?? 0,
+    dead: row?.dead ?? 0,
+    undeliverable: row?.undeliverable ?? 0,
+    overdue: row?.overdue ?? 0,
+    awaitingAllowance: row?.awaiting_allowance ?? 0,
+  }
 }
 
 /* ------------------------------------------------------------------ digests */

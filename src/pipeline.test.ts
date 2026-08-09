@@ -39,6 +39,7 @@ import { emailAdapter } from './email.ts'
 import { webhookAdapter } from './webhook.ts'
 import { dispatchDue, fanOutBroadcast, flushDueDigests, ingestEvent } from './pipeline.ts'
 import {
+  deliveryStats,
   insertBroadcast,
   listDeliveries,
   listNotifications,
@@ -345,6 +346,106 @@ describe('pipeline', { skip }, () => {
 
     // Nothing is due again — this is a terminal state, so it never re-enters the queue.
     assert.equal((await dispatchDue(rig.deps, 50)).claimed, 0)
+  })
+
+  /* ------------------------------------------------- the provider's allowance (micro-org#243) */
+
+  /**
+   * The refusal the estate's provider actually sends when its plan allowance is gone, as an
+   * adapter outcome. `retryAfterMs: 0` is the test seam and not a claim about the provider: it
+   * makes the parked delivery due again immediately so a loop can prove it is never dead-lettered,
+   * where the real value is the ~19 minutes the provider states.
+   */
+  const allowanceSpent = {
+    ok: false as const,
+    reason: 'quota_exhausted' as const,
+    retryable: true,
+    detail: "the mail provider's allowance is spent, not the credentials — SMTP 535, waiting 19m",
+    retryAfterMs: 0,
+  }
+
+  test('an exhausted allowance parks a verification mail; it is never dead-lettered by it', async () => {
+    // `maxAttempts: 3`, so the loop below runs FOUR TIMES the budget. Before this change the same
+    // shape dead-lettered on the third pass, and it did so in about thirty seconds of wall clock
+    // against an allowance that resets daily — which is micro-org#243 in one sentence: the first
+    // real visitor's verification link dies a day before the allowance that refused it comes back.
+    const rig = testRig(sql, { maxAttempts: 3 })
+    rig.adapters.email.failAlways(allowanceSpent)
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
+
+    await ingestEvent(
+      rig.deps,
+      registeredEvent('identity.email.verification_requested', ALICE, {
+        user_id: ALICE,
+        email: 'alice@cloudsforge.online',
+        token: 'a-verification-token',
+      }),
+    )
+
+    for (let pass = 0; pass < 12; pass += 1) {
+      const summary = await dispatchDue(rig.deps, 50)
+      assert.equal(summary.dead, 0, `pass ${pass}: an allowance refusal must not dead-letter`)
+    }
+
+    const rows = await sql<Array<{ state: string; reason: string; attempts: number; last_error: string }>>`
+      select state, reason, attempts, last_error from deliveries where channel = 'email'
+    `
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0]?.state, 'pending', 'parked, not terminal — it goes out when mail comes back')
+    assert.equal(rows[0]?.reason, 'quota_exhausted')
+    // The attempt `claimDeliveries` charged is refunded every pass, so the budget never moves. The
+    // budget counts refusals OF THIS MESSAGE, and the provider never looked at it.
+    assert.equal(rows[0]?.attempts, 0, 'twelve claims spent none of a budget of three')
+    // What an operator reads first says what happened in words, not just `SMTP 535`.
+    assert.match(rows[0]?.last_error ?? '', /allowance is spent, not the credentials/)
+
+    // The series to alert on, and the one that would have ended the misdiagnosis.
+    assert.equal(counterValue(rig.metrics, 'notify_failed_total', { channel: 'email', reason: 'quota_exhausted' }), 12)
+    // And it is visible as a standing fact, not only as a rate: "can a real person be verified
+    // right now" is answerable from one gauge.
+    assert.equal((await deliveryStats(sql)).awaitingAllowance, 1)
+
+    // Nothing terminal exists to find, because nothing was given up on.
+    const page = await listDeliveries(sql, { states: ['dead', 'undeliverable'], channel: null, limit: 20, cursor: null })
+    assert.equal(page.deliveries.length, 0)
+
+    // The allowance resets. The mail that was waiting for it goes out — the assertion that makes
+    // "parked" different from "quietly lost".
+    rig.adapters.email.reset()
+    const after = await dispatchDue(rig.deps, 50)
+    assert.equal(after.sent, 1)
+    assert.equal(rig.adapters.email.sent.length, 1)
+    assert.equal((await deliveryStats(sql)).awaitingAllowance, 0)
+  })
+
+  test('the parking is bounded by one allowance period, so nothing waits for ever', async () => {
+    // A refund with no bound is a row that retries silently for ever and never reaches the
+    // dead-letter view — a message nobody delivered and nobody can find, which is worse than a
+    // dead letter. After one provider day plus an hour of clock slack, attempts are charged again.
+    const rig = testRig(sql, { maxAttempts: 2 })
+    rig.adapters.email.failAlways(allowanceSpent)
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
+
+    await ingestEvent(
+      rig.deps,
+      registeredEvent('custody.key.exported', ALICE, { user_id: ALICE, key_id: 'key-1' }),
+    )
+    await dispatchDue(rig.deps, 50)
+
+    // Age the row past the bound. The clock that matters is the database's, which is the clock
+    // `created_at` and `now()` are both read from.
+    await sql`update deliveries set created_at = now() - interval '26 hours' where channel = 'email'`
+
+    let dead = 0
+    for (let pass = 0; pass < 5; pass += 1) dead += (await dispatchDue(rig.deps, 50)).dead
+    assert.equal(dead, 1, 'past the bound it behaves like any other retryable failure')
+
+    const rows = await sql<Array<{ state: string; outcome: string }>>`
+      select state, outcome from deliveries where channel = 'email'
+    `
+    assert.equal(rows[0]?.state, 'dead')
+    // Terminal, and spelled with the reason — so the dead-letter view says why in one column.
+    assert.equal(rows[0]?.outcome, 'dead_quota_exhausted')
   })
 
   /* ---------------------------------------------------------------- digests */

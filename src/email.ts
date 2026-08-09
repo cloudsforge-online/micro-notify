@@ -154,8 +154,29 @@ function classify(err: unknown): SendOutcome {
   //
   // Matched on the message rather than the code, because the code is the part that lies. A
   // genuine 5.7.8 credential failure carries none of these phrases and still fails fast.
+  //
+  // ── WHAT CHANGED ON 2026-08-09, AND WHY (micro-org#243) ──────────────────────────────────────
+  //
+  // This branch used to answer `upstream_error` with a detail of `SMTP 535`. Retryable, which was
+  // the #201 fix and is still right — and unreadable, which was the rest of #243. `SMTP 535`
+  // is the reply code for "credentials invalid"; it is what an operator sees in `last_error`, and
+  // `notify_failed_total{reason="upstream_error"}` is where the count landed, beside timeouts and
+  // gateway 5xxs. The estate diagnosed broken SMTP credentials twice from exactly this pair, on a
+  // relay that was authenticated and externally deliverable throughout.
+  //
+  // So the condition now has its own name and carries the provider's own retry-after out with it.
+  // ─────────────────────────────────────────────────────────────────────────────────────────────
   if (/sending limit|rate limit|too many|quota|try again later|retry in/i.test(message)) {
-    return failure('upstream_error', true, `SMTP ${code ?? 'rate-limited'}`)
+    const stated = retryAfterMs(message)
+    return failure(
+      'quota_exhausted',
+      true,
+      // Says the thing, in words, in the column an operator reads first. The code is kept because
+      // it is what a provider's support desk asks for; it is no longer the whole message.
+      `the mail provider's allowance is spent, not the credentials — SMTP ${code ?? 'rate-limited'}` +
+        `, waiting ${Math.round((stated ?? QUOTA_RETRY_FLOOR_MS) / 60_000)}m`,
+      stated ?? QUOTA_RETRY_FLOOR_MS,
+    )
   }
   if (typeof code === 'number') {
     if (code >= 500) return failure('rejected', false, `SMTP ${code}`)
@@ -166,6 +187,57 @@ function classify(err: unknown): SendOutcome {
     return failure('timeout', true, `SMTP ${name}`)
   }
   return failure('upstream_error', true, safe)
+}
+
+/**
+ * How long to wait when the provider refuses on volume and says nothing about when to come back.
+ *
+ * Fifteen minutes, chosen from the reply the estate's provider actually sends: measured on
+ * 2026-08-07 it named `retry in 19m21s`, and the phrasing ("daily sending limit") means the true
+ * wait can be hours. The shared exponential backoff tops out at five minutes and reaches
+ * `max_attempts` = 6 in well under one, so anything derived from attempt count is guaranteed to
+ * spend the whole budget inside a window the provider already told us to sit out.
+ *
+ * Erring long is the cheap direction. Too long delays a verification mail by minutes; too short
+ * dead-letters it, and a dead-lettered verification link is an account that can never sign in.
+ */
+export const QUOTA_RETRY_FLOOR_MS = 15 * 60_000
+
+/**
+ * The wait a provider states inside its refusal, in milliseconds, or null.
+ *
+ * There is no header to read: SMTP has no `Retry-After`, so the only place the duration exists is
+ * the free text of the reply, and the estate's provider writes it as `retry in 19m21s`. Parsed
+ * defensively — a provider is free to reword this tomorrow, and the answer to an unrecognised
+ * phrasing is `null` and the floor above, never a guess.
+ *
+ * Clamped to one hour, and the clamp is not paranoia about big numbers.
+ *
+ * A parked delivery costs one refused connection per wake-up and no attempt budget (see
+ * `markDeliveryFailed`), so waking early is nearly free while waiting long is not: every extra
+ * minute is a minute a verification link sits in a queue after the allowance has already come
+ * back. An hour is therefore "believe the provider, then go and look". It also contains the other
+ * direction — a reworded reply where this parser reads some unrelated number as a duration
+ * cannot park a delivery for a week.
+ */
+export function retryAfterMs(message: string): number | null {
+  const match = /(?:retry|try again)(?:\s+\w+)*?\s+in\s+(\d+)\s*([hms])(?:\s*(\d+)\s*([ms]))?/i.exec(message)
+  if (!match) return null
+
+  const unit = (value: string, suffix: string): number => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return 0
+    if (suffix.toLowerCase() === 'h') return n * 3_600_000
+    if (suffix.toLowerCase() === 'm') return n * 60_000
+    return n * 1_000
+  }
+
+  const total =
+    unit(match[1] ?? '0', match[2] ?? 's') +
+    (match[3] !== undefined && match[4] !== undefined ? unit(match[3], match[4]) : 0)
+
+  if (total <= 0) return null
+  return Math.min(total, 3_600_000)
 }
 
 /**

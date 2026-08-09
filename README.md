@@ -188,6 +188,22 @@ database tests do not run, and CI fails a build whose suite skipped them.
   port 465 only; setting it on 587, which is the port the estate uses, makes the connection fail
   rather than harden it.
 
+  **Since 2026-08-09 the service says this itself rather than leaving it to be re-derived**
+  (micro-org#243). A volume refusal is classified `quota_exhausted` rather than `upstream_error`,
+  so it has its own label on `notify_failed_total`, its own value in `deliveries.reason`, its own
+  `dead_quota_exhausted` / `undeliverable_quota_exhausted` spelling in the generated `outcome`
+  column, and one `warn` line that states it is not a credentials failure. `last_error` now reads
+  *"the mail provider's allowance is spent, not the credentials"* instead of `SMTP 535`. Alert on
+  `notify_deliveries_awaiting_allowance` — above zero for longer than one allowance period means a
+  real person cannot be verified right now.
+
+  It also no longer dead-letters on it. An allowance refusal does not spend the delivery's attempt
+  budget and waits out the retry-after the provider states, so the message is parked and goes out
+  when the allowance resets, bounded at one provider day plus an hour of clock slack. Before that,
+  `max_attempts` = 6 against a backoff that reaches its cap in about thirty seconds meant every
+  message written into an exhausted window was dead by construction — which is what the 1,048 rows
+  above are.
+
   Two things follow for anyone reading the delivery table. The dead rows are concentrated on
   accounts that no person owns — the estate has no real users yet, and the volume above is beacon
   and test residue — so this is a cold-start defect rather than an outage. And the failure is

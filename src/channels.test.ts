@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { DELIVERY_TOLERANCE_MS, SIGNATURE_HEADER, verifyDelivery } from '@cloudsforge/contracts-events'
 import { gatewayAdapter, inAppAdapter, recordingAdapter, registryOf, type OutboundMessage } from './channels.ts'
-import { emailAdapter, smtpConfigured } from './email.ts'
+import { emailAdapter, QUOTA_RETRY_FLOOR_MS, retryAfterMs, smtpConfigured } from './email.ts'
 import { DELIVERY_ID_HEADER, webhookAdapter } from './webhook.ts'
 import type { SmtpConfig } from './env.ts'
 import { ALICE } from './testsupport.ts'
@@ -191,9 +191,14 @@ test('a rate limit dressed as a 5xx auth failure is RETRYABLE (#201)', async () 
   assert.equal(quota.ok, false)
   if (!quota.ok) {
     assert.equal(quota.retryable, true, 'a quota rejection must be retried, not discarded')
-    // Reported as an upstream problem rather than a rejection, so the dashboards do not read it
-    // as "the address does not exist".
-    assert.equal(quota.reason, 'upstream_error')
+    // `quota_exhausted`, not `upstream_error`, since micro-org#243. The reason IS the diagnosis:
+    // it is the label on `notify_failed_total`, the value in `deliveries.reason` and the suffix on
+    // the generated `outcome` column, and while it read `upstream_error` the estate concluded
+    // three times over that its SMTP credentials were broken. They were not.
+    assert.equal(quota.reason, 'quota_exhausted')
+    // The provider named its own retry-after in the text — 19m21s — and it is carried out rather
+    // than replaced by an attempt-count backoff that reaches max_attempts in about thirty seconds.
+    assert.equal(quota.retryAfterMs, 19 * 60_000 + 21_000)
   }
 
   // AND THE CONTROL, or the carve-out would just be "retry every 5xx": a genuine credential
@@ -204,6 +209,49 @@ test('a rate limit dressed as a 5xx auth failure is RETRYABLE (#201)', async () 
     assert.equal(badCreds.retryable, false)
     assert.equal(badCreds.reason, 'rejected')
   }
+})
+
+test('a volume refusal that names no retry-after waits the floor, not an attempt-count backoff', async () => {
+  const adapter = emailAdapter({
+    smtp: { ...UNCONFIGURED, host: 'smtp.example.test', from: 'a@b.test' },
+    transport: async () => ({
+      async sendMail() {
+        // A provider that says only "later". Common, and the case where guessing short is worst:
+        // the shared backoff reaches `max_attempts` = 6 in about thirty seconds, so every guess
+        // derived from the attempt count is spent inside a window that is measured in hours.
+        throw Object.assign(new Error('421 4.7.0 too many messages, try again later'), {
+          responseCode: 421,
+        })
+      },
+    }),
+  })
+
+  const outcome = await adapter.send(message())
+  assert.equal(outcome.ok, false)
+  if (outcome.ok) return
+  assert.equal(outcome.reason, 'quota_exhausted')
+  assert.equal(outcome.retryable, true)
+  assert.equal(outcome.retryAfterMs, QUOTA_RETRY_FLOOR_MS)
+})
+
+test('the retry-after a provider states is read out of the text, because SMTP has no header', () => {
+  // HTTP has `Retry-After`. SMTP has a sentence, so this is a parser over free text and every case
+  // below is a shape a provider has been seen to write or could reasonably write tomorrow.
+  assert.equal(retryAfterMs('535 5.7.8 daily sending limit reached, retry in 19m21s'), 19 * 60_000 + 21_000)
+  assert.equal(retryAfterMs('421 too many messages, try again in 30 seconds'), 30_000)
+  assert.equal(retryAfterMs('rate limited: retry in 45m'), 45 * 60_000)
+
+  // Unrecognised is null, never a guess. The caller answers null with the documented floor, which
+  // is a decision somebody made once rather than a number this function invented.
+  assert.equal(retryAfterMs('535 5.7.8 Authentication credentials invalid'), null)
+  assert.equal(retryAfterMs('quota exceeded, try again later'), null)
+  assert.equal(retryAfterMs('retry in 0s'), null)
+
+  // Clamped at an hour, in the cheap direction. A parked delivery costs one refused connection per
+  // wake-up and no attempt budget, so waking early is nearly free; waiting long is a verification
+  // link sitting in a queue after the allowance has already come back.
+  assert.equal(retryAfterMs('retry in 2h'), 3_600_000)
+  assert.equal(retryAfterMs('retry in 30h'), 3_600_000)
 })
 
 /* ------------------------------------------------------------------ gateways */

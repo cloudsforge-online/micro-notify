@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { after, before, describe, test } from 'node:test'
 import type postgres from 'postgres'
 import { ALL_TABLES, MIGRATIONS, SCHEMA_VERSION } from './migrations.ts'
-import { CATEGORIES, CHANNELS, PRIORITIES } from './model.ts'
+import { CATEGORIES, CHANNELS, FAILURE_REASONS, PRIORITIES } from './model.ts'
 import { enabled, migrateTestDb, openDb, skip } from './testsupport.ts'
 
 test('versions are unique, contiguous and ascending', () => {
@@ -28,6 +28,44 @@ test('the CHECK lists are generated from the types, so they cannot drift', () =>
 
   const notifications = MIGRATIONS.find((m) => m.name === 'notifications')?.up ?? ''
   for (const priority of PRIORITIES) assert.match(notifications, new RegExp(`'${priority}'`))
+})
+
+test('a released migration does not re-render when a type it generated from grows', () => {
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  // THIS IS THE TEST THAT WOULD HAVE CAUGHT IT, AND IT DID NOT EXIST.
+  //
+  // `@cloudsforge/db` checksums a migration's TEXT and refuses to run when an applied one has
+  // changed. Version 5 generated its `reason` CHECK straight from `FAILURE_REASONS`, so adding
+  // one value to a TypeScript union — which is a source change nobody would think to call a
+  // schema change — rewrote a migration every database in the estate had applied, and `migrate`
+  // then refuses everything with a message about version 5 rather than about the union.
+  //
+  // So version 5 renders its own frozen list and the widening is version 8. This test pins the
+  // frozen text: the six values version 5 shipped with are still exactly the six it names.
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  const deliveries = MIGRATIONS.find((m) => m.name === 'deliveries')?.up ?? ''
+  const reasonCheck = /reason\s+text\s+check \(reason is null or reason in \(([^)]*)\)\)/.exec(deliveries)
+  const frozen = reasonCheck?.[1] ?? ''
+  assert.equal(
+    frozen,
+    "'no_transport', 'no_address', 'invalid_payload', 'rejected', 'timeout', 'upstream_error'",
+  )
+
+  // And the frozen list is a PREFIX of the live one, not merely different from it. A value may be
+  // added; one may not be removed or reordered out from under a constraint that already admits it.
+  const asShipped = frozen.split(', ').map((value) => value.replace(/'/g, ''))
+  assert.deepEqual(FAILURE_REASONS.slice(0, asShipped.length), asShipped)
+})
+
+test('every failure reason this build can write is admitted by some migration', () => {
+  // The constraint is what turns "a reason the code emits but the schema refuses" from a rejected
+  // insert at three in the morning into a failed test. `quota_exhausted` is the first value to
+  // arrive after version 5, and it arrives in version 8.
+  const widened = MIGRATIONS.find((m) => m.name === 'quota-exhausted-reason')?.up ?? ''
+  for (const reason of FAILURE_REASONS) assert.match(widened, new RegExp(`'${reason}'`))
+  // Expand-only: it drops the old constraint by name and adds one that is a superset, so a replica
+  // of the previous release writing `upstream_error` against this schema is unaffected.
+  assert.match(widened, /drop constraint if exists deliveries_reason_check/)
 })
 
 test('the two constraints that encode §10.3 are present in the migration text', () => {

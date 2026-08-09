@@ -24,6 +24,7 @@ export const NOTIFICATIONS_TOTAL = 'notify_notifications_total'
 export const DELIVERIES_PENDING = 'notify_deliveries_pending'
 export const DELIVERIES_DEAD = 'notify_deliveries_dead'
 export const DIGESTS_OPEN = 'notify_digests_open'
+export const AWAITING_ALLOWANCE = 'notify_deliveries_awaiting_allowance'
 
 export function registerServiceMetrics(metrics: Metrics): Metrics {
   return metrics
@@ -91,6 +92,18 @@ export function registerServiceMetrics(metrics: Metrics): Metrics {
     .register({
       name: DIGESTS_OPEN,
       help: 'Digest batches waiting for their window',
+      kind: 'gauge',
+    })
+    .register({
+      name: AWAITING_ALLOWANCE,
+      // The wording is the deliverable. micro-org#243 took three wrong diagnoses — bad SMTP
+      // credentials, a wrong public URL, a rogue agent — because the only evidence an operator
+      // had was `SMTP 535` and a counter labelled `upstream_error`. A series whose help text says
+      // "the provider's allowance is spent" ends that conversation before it starts.
+      //
+      // Alert on it above zero for longer than one allowance period. Above zero for minutes is
+      // the system working: the delivery is parked and will go out when the allowance resets.
+      help: 'Deliveries parked because the mail provider\'s sending allowance is spent — NOT a credentials failure',
       kind: 'gauge',
     })
 }

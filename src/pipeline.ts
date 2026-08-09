@@ -571,13 +571,48 @@ export async function dispatchDue(deps: PipelineDeps, limit: number): Promise<Di
       continue
     }
 
+    // The provider's allowance is not this message's fault, so it neither spends this message's
+    // attempt budget nor waits on a backoff derived from it — see `markDeliveryFailed` in
+    // `store.ts` and `QUOTA_RETRY_FLOOR_MS` in `email.ts`. micro-org#243.
+    const outOfAllowance = outcome.reason === 'quota_exhausted'
+
     const state = await markDeliveryFailed(deps.sql, delivery.id, {
       reason: outcome.reason,
       retryable: outcome.retryable,
       detail: outcome.detail,
-      backoffMs: backoff(delivery.attempts),
+      // A provider that stated its own retry-after is obeyed. Nothing but the mail adapter sets
+      // this today, and a channel that never states one is unaffected.
+      backoffMs: outcome.retryAfterMs ?? backoff(delivery.attempts),
+      consumesAttempt: !outOfAllowance,
     })
     deps.metrics.increment(FAILED_TOTAL, { channel: delivery.channel, reason: outcome.reason })
+
+    if (outOfAllowance) {
+      // ── SAID PLAINLY, ONCE PER REFUSAL. ────────────────────────────────────────────────────
+      //
+      // This log line is a deliverable of micro-org#243 rather than debugging left in. The
+      // condition it reports spent 1,839 sends on 2026-08-07 and was diagnosed, in order, as
+      // broken SMTP credentials, a misconfigured public URL and an agent run — because the only
+      // thing it had ever said was `535`. It now says what it is, and says what it is not.
+      //
+      // `warn`, not `error`. Mail is queued, not lost: the delivery is parked and goes out when
+      // the allowance resets, which is the outcome, not a failure. It becomes an error the moment
+      // it dead-letters, and the branch below already logs that.
+      deps.logger.warn("the mail provider's sending allowance is exhausted", {
+        deliveryId: delivery.id,
+        notificationId: delivery.notificationId,
+        channel: delivery.channel,
+        category: delivery.category,
+        // Named so nobody re-derives it a fourth time. The provider answers this condition with a
+        // 5xx AUTH code, and a 5xx AUTH code is what a credential failure looks like.
+        note: 'not a credentials failure and not an attacker; the plan allowance is spent',
+        retryAfterMs: outcome.retryAfterMs ?? null,
+        // A parked delivery does not move towards dead-lettering, so this is the number that says
+        // how long it has genuinely been trying rather than how long the allowance has been gone.
+        attempts: delivery.attempts,
+      })
+    }
+
     if (state === 'dead') {
       deps.metrics.increment(DEADLETTER_TOTAL)
       dead += 1
