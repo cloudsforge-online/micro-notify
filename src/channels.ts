@@ -58,6 +58,16 @@ export type SendOutcome =
       readonly retryable: boolean
       /** Safe to store in `deliveries.last_error`. Must never contain a credential. */
       readonly detail: string
+      /**
+       * How long the provider says to wait, when it says.
+       *
+       * Absent means "use the shared exponential backoff", which is right for a failure whose
+       * duration nobody knows. Present means the provider stated a duration — the estate's mail
+       * provider names its own retry-after in the text of an exhausted-allowance reply — and
+       * guessing shorter is not clever, it is six refused attempts inside the window the provider
+       * just told us to sit out. See `classify` in `email.ts` and `dispatchDue` in `pipeline.ts`.
+       */
+      readonly retryAfterMs?: number
     }
 
 export interface ChannelAdapter {
@@ -76,8 +86,21 @@ export function registryOf(adapters: readonly ChannelAdapter[]): AdapterRegistry
   return map
 }
 
-export function failure(reason: FailureReason, retryable: boolean, detail: string): SendOutcome {
-  return { ok: false, reason, retryable, detail: detail.slice(0, 500) }
+export function failure(
+  reason: FailureReason,
+  retryable: boolean,
+  detail: string,
+  retryAfterMs?: number,
+): SendOutcome {
+  return {
+    ok: false,
+    reason,
+    retryable,
+    detail: detail.slice(0, 500),
+    // Omitted rather than set to undefined: `exactOptionalPropertyTypes` is on, and a present key
+    // holding undefined is not the same value as an absent one to anything that spreads it.
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+  }
 }
 
 /* ------------------------------------------------------------------ in-app */

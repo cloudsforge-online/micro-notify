@@ -23,7 +23,13 @@ import { Lifecycle, httpProbe, installSignalHandlers, postgresProbe } from '@clo
 import { Logger, Metrics, registerHttpMetrics, registerJobMetrics } from '@cloudsforge/telemetry'
 import { SERVICE, env, transportSummary } from './env.ts'
 import { SCHEMA_VERSION } from './migrations.ts'
-import { registerServiceMetrics, DELIVERIES_DEAD, DELIVERIES_PENDING, DIGESTS_OPEN } from './metrics.ts'
+import {
+  registerServiceMetrics,
+  AWAITING_ALLOWANCE,
+  DELIVERIES_DEAD,
+  DELIVERIES_PENDING,
+  DIGESTS_OPEN,
+} from './metrics.ts'
 import { createServer } from './server.ts'
 import { BROADCAST_KIND, DISPATCH_KIND, registerHandlers, rescheduleRecurring, seedRecurring } from './jobs.ts'
 import { emailAdapter, smtpConfigured } from './email.ts'
@@ -164,6 +170,7 @@ const server = createServer({
     metrics.set(DELIVERIES_PENDING, deliveries.pending)
     metrics.set(DELIVERIES_DEAD, deliveries.dead, { state: 'dead' })
     metrics.set(DELIVERIES_DEAD, deliveries.undeliverable, { state: 'undeliverable' })
+    metrics.set(AWAITING_ALLOWANCE, deliveries.awaitingAllowance)
     metrics.set(DIGESTS_OPEN, await openDigestCount(sql))
   },
 })

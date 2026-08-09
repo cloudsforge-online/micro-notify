@@ -191,6 +191,9 @@ export type SuppressionReason = (typeof SUPPRESSION_REASONS)[number]
  * the request and an operator acts on it). It is therefore **not retryable** — retrying cannot
  * conjure a transport — and it lands the delivery in `undeliverable`, retained, countable, and
  * visible in the dead-letter view.
+ *
+ * `quota_exhausted` is the one that had to be added. Read its entry below and `email.ts`'s
+ * `classify` together; the pair is the whole of micro-org#243's remaining half.
  */
 export const FAILURE_REASONS = [
   'no_transport',
@@ -199,6 +202,34 @@ export const FAILURE_REASONS = [
   'rejected',
   'timeout',
   'upstream_error',
+  /**
+   * The mail provider refused because this deployment has sent its allowance, not because
+   * anything is wrong with the message, the address or the credentials.
+   *
+   * ## Why this is not `upstream_error`
+   *
+   * It was, until 2026-08-09, and being indistinguishable from every other upstream failure is
+   * what made micro-org#243 take three wrong diagnoses to trace. The estate's provider answers an
+   * exhausted allowance with
+   *
+   *     535 5.7.8 Your account has reached its daily sending limit ... retry in 19m21s
+   *
+   * so the only thing an operator saw was `notify_failed_total{reason="upstream_error"}` and a
+   * `last_error` reading `SMTP 535` — a 5xx AUTH code, which reads as "the password is wrong".
+   * Two people concluded exactly that; the mainnet relay was authenticated and externally
+   * deliverable the whole time, SPF, DKIM and DMARC all passing.
+   *
+   * A reason of its own gives the fact a series and a word: an exhausted allowance says so in the
+   * counter label, in `deliveries.reason`, in the `outcome` column and in one log line.
+   *
+   * ## It is retryable, and it does not spend an attempt
+   *
+   * See `markDeliveryFailed` in `store.ts`. A daily allowance returns on the provider's clock,
+   * measured in hours; `deliveries.max_attempts` is 6 and the shared backoff tops out at five
+   * minutes, so before this reason existed the six attempts were spent in under a minute and the
+   * message was dead-lettered by a condition that would have cleared on its own.
+   */
+  'quota_exhausted',
 ] as const
 
 export type FailureReason = (typeof FAILURE_REASONS)[number]

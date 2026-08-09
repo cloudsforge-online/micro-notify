@@ -39,6 +39,41 @@ import {
   sqlValues,
 } from './model.ts'
 
+/**
+ * The failure reasons as version 5 rendered them, frozen — **never edit this list**.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **A GENERATED CHECK LIST IN A RELEASED MIGRATION IS A CHECKSUM THAT CHANGES WHEN A TYPE DOES.**
+ *
+ * Version 5 interpolated `sqlValues(FAILURE_REASONS)` directly. That is exactly the drift-proofing
+ * this file's header argues for, and it has one consequence nobody had hit until 2026-08-09:
+ * `@cloudsforge/db` checksums each migration's **text**, so adding one value to the TypeScript
+ * union rewrites the text of a migration every database in the estate has already applied.
+ * `migrate` then refuses to run at all — `migration 5 (deliveries) was modified after it was
+ * applied` — and the service cannot boot. Not the reason it refuses to boot, either: it refuses on
+ * a schema check with no mention of the union that moved.
+ *
+ * So version 5 renders this frozen copy, byte for byte what it rendered before, and every later
+ * addition arrives as its own migration widening the constraint. The generation stays where it
+ * still pays — a value cannot be spelled two ways — and `migrations.test.ts` asserts this list is
+ * a prefix of the live one, so a reason can still be ADDED and cannot be quietly removed or
+ * reordered underneath a released constraint.
+ *
+ * The same trap is loaded in every other generated CHECK here (`CATEGORIES`, `CHANNELS`,
+ * `PRIORITIES`, `DIGESTS`, `SUPPRESSION_REASONS`, `DELIVERY_STATES`). They are left alone because
+ * none of them has moved and a speculative freeze of six lists would be six chances to typo a
+ * value into a checksum. When one of them moves, it takes this treatment.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+const FAILURE_REASONS_AT_5: readonly string[] = [
+  'no_transport',
+  'no_address',
+  'invalid_payload',
+  'rejected',
+  'timeout',
+  'upstream_error',
+]
+
 export const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -171,7 +206,7 @@ export const MIGRATIONS: readonly Migration[] = [
         channel         text        not null check (channel in (${sqlValues(CHANNELS)})),
         target_id       uuid        references channel_targets (id) on delete set null,
         state           text        not null default 'pending' check (state in (${sqlValues(DELIVERY_STATES)})),
-        reason          text        check (reason is null or reason in (${sqlValues(FAILURE_REASONS)})),
+        reason          text        check (reason is null or reason in (${sqlValues(FAILURE_REASONS_AT_5)})),
         attempts        integer     not null default 0,
         max_attempts    integer     not null default 6,
         next_attempt_at timestamptz not null default now(),
@@ -270,6 +305,28 @@ export const MIGRATIONS: readonly Migration[] = [
         constraint broadcasts_listed_has_users
           check (audience <> 'listed' or cardinality(user_ids) > 0)
       );
+    `,
+  },
+  {
+    version: 8,
+    name: 'quota-exhausted-reason',
+    up: `
+      -- Widen deliveries.reason to admit 'quota_exhausted' — micro-org#243.
+      --
+      -- An expand, and only an expand: every value version 5 admitted is still admitted, so a
+      -- replica of the OLD code writing 'upstream_error' against this schema is unaffected and a
+      -- rollback needs nothing. That ordering matters more than usual here, because the whole
+      -- point of the new value is that it is written by the code path an operator reaches for
+      -- while mail is already not going out.
+      --
+      -- The constraint is dropped by the name Postgres gave the inline column CHECK in version 5.
+      -- 'if exists' rather than a bare drop: a database built by a future consolidated baseline
+      -- may not carry that auto-generated name, and a migration that fails on a database with no
+      -- constraint to remove would be a boot failure over a constraint that was already correct.
+      alter table deliveries drop constraint if exists deliveries_reason_check;
+      alter table deliveries
+        add constraint deliveries_reason_check
+        check (reason is null or reason in (${sqlValues(FAILURE_REASONS)}));
     `,
   },
 ]
