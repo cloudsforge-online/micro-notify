@@ -534,6 +534,20 @@ export function rewardNameOf(payload: Record<string, unknown>): string {
 }
 
 /**
+ * Which way did an exchange transfer go? **Evidence only — absence reads as a deposit.**
+ *
+ * `settleTransfer` sends `direction` as `'deposit'` or `'withdrawal'` off a column that admits
+ * nothing else, so the two-way test is exhaustive against today's producer. The asymmetry is
+ * deliberate and is the `wasBroadcast` argument: the DEFAULT is what an event gets when the field
+ * is missing or a producer adds a third direction, and a deposit — money arriving somewhere new —
+ * is the reading that cannot mislead a reader about where their money is. A withdrawal has to be
+ * earned by the producer saying so.
+ */
+function isWithdrawalFrom(payload: Record<string, unknown>): boolean {
+  return str(payload, ['direction'], '') === 'withdrawal'
+}
+
+/**
  * Is this payload's asset code one the estate is winding down?
  *
  * The list rather than contracts' own `isRetiredAsset` (`contracts/packages/chain/src/index.ts:71`),
@@ -1247,6 +1261,124 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
         at: formatInstant(event.occurredAt),
       }),
       (event) => `cf:trade:bot:${str(event.payload, ['bot_id', 'botId'], event.key)}`,
+    ),
+  }),
+
+  /* --------------------------------------------------------- trade's other six. micro-org#345
+   *
+   * Six topics arrived at once and TWO of them got rules. The split is not "how important is
+   * trading" — it is the question this catalogue asks of everything: **is the reader somewhere
+   * else when this happens, and is this the only thing that will tell them?**
+   *
+   *   - `trade.fee.settled`     — RULE. The platform takes money on its own initiative, from a
+   *                               customer who is not watching. Nothing else says so.
+   *   - `trade.transfer.settled`— RULE. It settles asynchronously, after the user has left the
+   *                               screen they started it from.
+   *   - `trade.bot.created`     — no. The user is looking at the bot they just made.
+   *   - `trade.bot.started`     — no. Same, and `trade.bot.paused` above is the half that is news.
+   *   - `trade.fill.settled`    — no. Per-fill mail is the worst noise source a bot could have.
+   *   - `trade.order.filled`    — no. The terminal shows fills live, as they happen.
+   *
+   * Each of the four is written out in `NON_NOTIFYING_TOPICS` at the length of a decision, because
+   * a topic that is silently absent from this table and a topic somebody decided against are
+   * indistinguishable a year later.
+   */
+
+  /**
+   * **THE PLATFORM CHARGING THE CUSTOMER**, which is the only trade event with that shape.
+   *
+   * Every other rule in this block, and both of the API-key rules below it, tells somebody about
+   * something they or an attacker did. This one tells them about something CLOUDSFORGE did to
+   * their balance while they were not looking: `settleFee` runs on trade's own settlement path,
+   * not on a request, and the fee is deducted whether or not anyone is on the screen. `high` for
+   * the reason `billing` is: money leaving an account on the platform's initiative is worth an
+   * interruption, and a customer who finds out from a balance is a customer who opens a ticket.
+   *
+   * **Not `critical`.** §10.3's list is the set a user must never be able to silence, and it is
+   * about security and about money that has gone MISSING. A fee that was correctly charged and is
+   * fully explained on the settlement history does not belong in a set whose value comes from
+   * being small — the argument `withdrawal.failed_refunded` makes for stepping down from it.
+   *
+   * **The recipient is the ENVELOPE ACTOR, and here that is safe rather than merely convenient.**
+   * `settleFee` builds it from the BOT ROW's own `userId` column, not from a caller — so it is the
+   * owner whatever reached the emit, which is a property of the producer rather than an
+   * observation about who usually acts. `activity` reads the same field for the same reason and
+   * quarantines the reader to the same topics. `userIdOf`'s actor branch is the last resort it
+   * describes; it is reached here because the payload — `{ settlementId, botId, period, collected,
+   * entryId }` — names nobody, and the key is the SETTLEMENT, a uuid that is not a person.
+   *
+   * **Keyed on the settlement, not the bot and not the event.** One fee settlement is one charge;
+   * a redelivery is the same charge, and next period's fee on the same bot is a different one.
+   */
+  'trade.fee.settled': Object.freeze({
+    category: 'trading',
+    priority: 'high',
+    templateId: 'trading.fee_charged',
+    why: 'The platform taking money out of a balance on its own initiative, from a user who is not on the screen — settleFee runs on trade\'s settlement path rather than on a request. Nothing else in the estate reports it, so silence here is a customer who discovers a charge by noticing a smaller number.',
+    recipients: forUser(
+      (event) => `trading.fee_charged:${str(event.payload, ['settlement_id', 'settlementId'], event.key)}`,
+      (event) => ({
+        botLabel: str(event.payload, ['bot_name', 'botName', 'name', 'bot_id', 'botId'], 'your trading bot'),
+        // The period counter trade numbers a bot's settlements by, which is the handle a support
+        // conversation uses. `str` treats an empty string as absent, so a missing one degrades to
+        // the phrase rather than rendering "for period ".
+        period: str(event.payload, ['period'], 'the period just settled'),
+        at: formatInstant(event.occurredAt),
+      }),
+      (event) => `cf:trade:bot:${str(event.payload, ['bot_id', 'botId'], '')}`,
+    ),
+  }),
+
+  /**
+   * Money crossing the boundary between a wallet balance and an exchange balance.
+   *
+   * **The rule exists because the settlement is ASYNCHRONOUS.** `settleTransfer` claims a row that
+   * is `pending` or `unresolved` and settles it against the ledger afterwards, which is a different
+   * moment from the one the user pressed the button in — they have left the screen, and a transfer
+   * that has not landed and a transfer that has look identical from where they are standing. That
+   * is the same test `wallet.deposit_address.assigned` FAILS ("the user is looking at it") and the
+   * one `settlement.withdrawal.completed` passes.
+   *
+   * **Two facts, and `direction` decides.** A deposit ends with money that can be traded and a
+   * withdrawal ends with money back in a wallet balance; they are not one sentence with a different
+   * noun, and the two templates point at two different screens because the money is in two
+   * different places. `activity` splits the same event the same way, so the feed row and the mail a
+   * user reads on one screen cannot say opposite things.
+   *
+   * **`normal`, not `high`.** This is the confirmation of something that worked, which the reader
+   * asked for and expects — the `withdrawal.completed` shape. `high` is for the ones that are wrong
+   * or that nobody asked for.
+   *
+   * **No amount, and the asset instead.** `settleTransfer` sends `amount` in base units off a
+   * `numeric(78,0)` column, so its scale is `chainSpec(asset).decimals` and no service downstream
+   * of trade may look that up. See the templates.
+   */
+  'trade.transfer.settled': Object.freeze({
+    category: 'transfer',
+    // The default is the deposit, because it is the direction that leaves money somewhere new.
+    priority: 'normal',
+    templateId: 'transfer.exchange_deposit',
+    why: 'A transfer between a wallet balance and an exchange balance settles asynchronously, after the user has left the screen they started it from, and nothing else tells them it landed. Normal rather than high: it is the confirmation of something they asked for and that worked.',
+    variant: Object.freeze({
+      when: (event) => isWithdrawalFrom(event.payload),
+      priority: 'normal',
+      templateId: 'transfer.exchange_withdrawal',
+      why: 'The money ends somewhere else, so the sentence and the LINK are both different: a deposit points at the trading balances and a withdrawal at the wallet. One template covering both would have to hedge about where the money now is, which is the only thing the reader opened it for.',
+    } satisfies Variant),
+    recipients: forUser(
+      // Keyed on the transfer, which is the fact. A redelivery is the same transfer; two transfers
+      // of the same asset in a minute are two, and `event.id` would dedupe neither correctly.
+      (event) =>
+        `${isWithdrawalFrom(event.payload) ? 'transfer.exchange_withdrawal' : 'transfer.exchange_deposit'}:${str(event.payload, ['transfer_id', 'transferId'], event.key)}`,
+      (event) => ({
+        // `asset`, which is trade's spelling; the other two are read because a producer's field
+        // name is not this service's to assume, and `ledger.entry.posted` above reads all three.
+        // Empty rather than a stand-in word, as every other asset-bearing rule in this file does:
+        // a sentence with a gap in it degrades honestly, and a guessed unit does not.
+        asset: str(event.payload, ['asset_code', 'assetCode', 'asset'], ''),
+        at: formatInstant(event.occurredAt),
+      }),
+      (event) => `cf:trade:transfer:${str(event.payload, ['transfer_id', 'transferId'], event.key)}`,
     ),
   }),
 
@@ -2001,6 +2133,19 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
     'The claimant claimed it, in the client, and is standing on the ground they just took — land is free and the claim is synchronous (world.ts, the emit is inside the same transaction as the insert). aetherholm.city.founded exactly. The only other party is the ward, which is not a person.',
   'tessera.ward.opened':
     'A world event with no individual subject: the payload is a ward id, a slug, an archetype, an ordinal and a tile count, and names no user at all. Opening a ward is inventory, announced when it is worth announcing through /admin/broadcasts. aetherholm.season.opened.',
+  // ── trade: four of the six that arrived with micro-org#345 ────────────────────────────────
+  // The other two are RULES above. The line between them is not how much money is involved — a
+  // fill can be larger than a fee — but whether the reader is somewhere else and whether anything
+  // else will tell them. All four below fail one of those two tests, and the first three fail the
+  // same one `aetherholm.city.founded` and `wallet.deposit_address.assigned` fail.
+  'trade.bot.created':
+    'The user is looking at the bot they just configured. Creating a bot is a form submission with a synchronous response — `insertBot` returns the row the client renders — and no money has moved: the ledger is not called until the bot is STARTED. Confirming a thing the person watched happen, about money that has not moved, is the purest form of the noise that teaches people to filter this channel. The feed keeps the record, and `trade.bot.paused` above is the half of a bot\'s lifecycle that is genuinely news, because it happens while they are not there.',
+  'trade.bot.started':
+    'Same reasoning as trade.bot.created: the owner pressed start and is on the screen watching the bot go green. The one thing here that would be worth an interruption — the ledger reservation that takes a live bot\'s allocation out of the spendable balance — is a consequence the user chose in the same gesture, seconds earlier, and it is on the record either way (`contracts` audits this topic, and activity files it as a financial record). The asymmetry with `trade.bot.paused` is deliberate and is the whole shape of this block: stopping is what happens without being asked.',
+  'trade.fill.settled':
+    'A running bot fills continuously — that is what it is for — so a rule here is one message per fill, per bot, for as long as the bot runs, which would be the largest noise source in the estate by an order of magnitude. It also names nobody: the emit passes no actor, so the envelope is `service:trade`, and the payload is `{ fillId, botId, side, qty, shards, entryId }` with no user on it at all, so this rule could only ever have answered no_recipient. The bot\'s own settlement history is the right surface for a sequence, and the fee that comes OUT of those fills is the fact worth a message — see the trade.fee.settled rule.',
+  'trade.order.filled':
+    'The terminal shows fills live, as they happen, which is where the person who placed the order is standing — an exchange order is placed from a screen whose whole purpose is watching it fill, and partial fills mean one order can produce several of these. This is the trade-desk form of the argument emberkin.battle.resolved makes: an out-of-band ping for an in-band moment. It is also behind TRADE_EXCHANGE_ENABLED today, and a rule written now would be a notification nobody has ever received being tuned by nobody; when the venue is live and there is evidence about how long an order rests unfilled, a resting-order rule is a decision worth making with that data.',
   'settlement.sweep.completed':
     "A deposit address emptied into the pinned treasury. No user balance changes — wallet credited the deposit when it confirmed, long before the sweep — so there is nothing here a person could act on or would recognise. It exists for reconciliation, which is the one movement no other topic reports, and it is keyed by the sweep source rather than by anybody.",
 })
