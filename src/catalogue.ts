@@ -976,6 +976,74 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     ),
   }),
 
+  /**
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * THE OPPOSITE FACT TO THE ONE ABOVE, AND IT NEEDS ITS OWN RULE — micro-org#200.
+   *
+   * `wallet.deposit.confirmed` says money is spendable. This says money arrived and is **not**:
+   * a token transfer reached a custodial deposit address, and `micro-wallet` will not credit it,
+   * because crediting a `TOKEN:` asset needs decimals it has no source for, a `chain_assets` row
+   * only `micro-ledger` may write, a `micro-pricing` route that answers for the urn — it answers
+   * `404 not_found` — and a withdrawal path that does not exist. Until this rule the event did not
+   * exist either: the transfer was consumed and discarded and nobody was ever told.
+   *
+   * ── `high`, not `critical` ────────────────────────────────────────────────────────────────
+   *
+   * `critical` is 04-domain-model §10.3's list exactly — new device, password change, MFA change,
+   * key export, withdrawal — and this is not on it. It is tempting, because the sentence is
+   * alarming; the rule is that `critical` ignores the user's preferences, and a `critical` set
+   * that grows on urgency is a preference page that gradually stops working. `high` is where
+   * `deposit.confirmed` sits and this is the same kind of news about the same money.
+   *
+   * ── Keyed on the movement, not the event ──────────────────────────────────────────────────
+   *
+   * The dedupe key is the sighting, so a redelivery and a reorg re-emit of one arrival are one
+   * notification. `micro-wallet` already collapses these at its end — the row is unique on
+   * `(chain, network, tx_hash, log_index)` and only a first insert emits — and this is the second
+   * belt, in the service whose duplicate a user would actually see.
+   *
+   * ── The recipient is read, never inferred ─────────────────────────────────────────────────
+   *
+   * `userIdOf` falls back to the envelope key only for topics the registry declares
+   * `keyed_by: user_id`. This one is keyed by `wallet_id`, exactly as `wallet.deposit.confirmed`
+   * is, so that fallback is correctly unavailable — and attributing a wallet id to a user is the
+   * single worst mistake this service can make. `micro-wallet` therefore puts `userId` on the
+   * payload, which `userIdOf` reads first and prefers anyway. This rule cannot address a stranger
+   * by accident, because there is nothing here for it to guess with.
+   *
+   * ── The registration had to come first, and did ───────────────────────────────────────────
+   *
+   * `micro-contracts` registered the topic (micro-contracts#5) before this landed. That ordering
+   * is not politeness: `validateEnvelope` refuses an unregistered name and the producer's relay
+   * quarantines on that verdict rather than delivering, so a rule written ahead of the registry is
+   * a rule that cannot fire — the state `AWAITING_REGISTRATION` exists to make visible, and one
+   * this change did not need to enter.
+   *
+   * ── The params are three strings and not an amount ────────────────────────────────────────
+   *
+   * There is deliberately no `amount` and no `asset` here, and the template header says why: the
+   * producer sends smallest units with no decimals because it has none, and rendering them beside
+   * a token name would state a figure that may be wrong by a factor of 10^12.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  'wallet.deposit.token_uncredited': Object.freeze({
+    category: 'deposit',
+    priority: 'high',
+    templateId: 'deposit.token_uncredited',
+    why: 'Money reached an address the platform controls and is in no balance. Nothing else in the estate will ever tell the user that, and a second transfer to the same address is the harm this prevents.',
+    recipients: forUser(
+      (event) =>
+        `deposit.token_uncredited:${str(event.payload, ['sighting_id', 'sightingId', 'tx_hash', 'txHash'], event.id)}`,
+      (event) => ({
+        chain: str(event.payload, ['chain'], 'your'),
+        contract: str(event.payload, ['token_address', 'tokenAddress', 'asset_code', 'assetCode'], 'unknown'),
+        txHash: str(event.payload, ['tx_hash', 'txHash'], 'unknown'),
+      }),
+      (event) =>
+        `cf:wallet:deposit:${str(event.payload, ['sighting_id', 'sightingId', 'tx_hash', 'txHash'], event.id)}`,
+    ),
+  }),
+
   'settlement.withdrawal.completed': Object.freeze({
     category: 'withdrawal',
     priority: 'high',

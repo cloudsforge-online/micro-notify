@@ -262,6 +262,46 @@ export const TEMPLATES = Object.freeze({
     path: '/wallet/activity',
     text: en('Your deposit has been credited', '{{amount}} {{asset}} is now available in your wallet.'),
   }),
+  /**
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * A TOKEN ARRIVED AT A DEPOSIT ADDRESS AND IS NOT IN THE BALANCE — micro-org#200.
+   *
+   * The hardest wording in this file, because every reassuring sentence available for it is false.
+   * What is true is small and has to be said anyway: the transfer was seen, it is at an address
+   * the platform controls, it is not spendable, and nothing here can send it back today. A user
+   * who reads this and does nothing has lost nothing; a user who reads a softer version and sends
+   * a second transfer has.
+   *
+   * ── What this must not say ────────────────────────────────────────────────────────────────
+   *
+   * **Not "pending", and not "processing".** Both promise a later state that no code in this
+   * estate can reach: crediting a `TOKEN:` asset needs decimals from a registry, a `chain_assets`
+   * row and a withdrawal path, none of which exist. `withdrawal.stuck` in this file was rewritten
+   * for the same class of error in the other direction — a template that told a user their money
+   * was untouched while it was reserved — and the lesson it records is that the comforting
+   * sentence is the one to check first.
+   *
+   * **No amount, and no asset name.** Every other money template opens with `{{amount}}
+   * {{asset}}`, and this one cannot: the producer sends smallest units with no decimals, because
+   * it has no source for them, so "250000000" is 250 of the token or 0.00000000025 of it and
+   * nothing here can tell which. A number off by 10^12 in a mail about the user's own money is
+   * worse than no number. The contract address is sent instead — it is unambiguous, it is what an
+   * explorer takes, and it is the only name for a token that cannot be spoofed.
+   *
+   * `path` points at the deposits screen rather than activity, because the transfer is not in the
+   * activity feed: there is no ledger entry for it to be in.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  'deposit.token_uncredited': Object.freeze({
+    id: 'deposit.token_uncredited',
+    category: 'deposit',
+    params: ['chain', 'contract', 'txHash'],
+    path: '/wallet/deposits',
+    text: en(
+      'A token arrived at your deposit address and has not been credited',
+      'A token transfer reached your {{chain}} deposit address. It has NOT been added to your balance, and it cannot be withdrawn.\n\nThat address accepts the coin it was issued for. Tokens sent to it are held at an address CloudsForge controls, and support for crediting or returning them does not exist yet — so please do not send more to it.\n\nToken contract: {{contract}}\nTransaction: {{txHash}}\n\nThe transfer is recorded against your account and is visible on your deposits page. Contact support with that transaction reference and we will tell you where it stands.',
+    ),
+  }),
   'withdrawal.requested': Object.freeze({
     id: 'withdrawal.requested',
     category: 'withdrawal',
