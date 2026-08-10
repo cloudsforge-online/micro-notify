@@ -494,6 +494,72 @@ export const TEMPLATES = Object.freeze({
       '{{botLabel}} stopped trading at {{at}}.\n\nPausing does not close its position — anything the bot was holding is still open and still moving with the market. Review it and close it yourself if you want to be out.',
     ),
   }),
+  /**
+   * The platform charging the customer. micro-org#345.
+   *
+   * **The one trade notification that is not a confirmation of something the user just did.** A
+   * performance fee is taken on the estate's own initiative, out of a balance the customer is not
+   * watching at the moment it happens, and nothing else in the estate says so — `trade.fee.settled`
+   * is the only event carrying it. That is the difference between this and the fills, which the
+   * terminal shows live and which get no rule at all.
+   *
+   * **No figure, and the reason is the same one `activity` writes down at its classifier.** A
+   * performance fee is `collected` Shards, an integer count with no sub-unit (`trade/src/money.ts`),
+   * and this service has no more idea of an asset's scale than that one does — `transfer.posted`
+   * above prints an amount only because `ledger.entry.posted` sends one it can print. A subject
+   * reading "You were charged 1,250" for a $12.50 fee is worse than one that does not quote a
+   * figure, because the reader believes it. The period and the link are what make it checkable.
+   *
+   * The second sentence is the one a support conversation would otherwise be about: a performance
+   * fee is charged on the gain above the previous high-water mark, so a bot that lost and recovered
+   * is not billed twice for the same ground.
+   */
+  'trading.fee_charged': Object.freeze({
+    id: 'trading.fee_charged',
+    category: 'trading',
+    params: ['botLabel', 'period', 'at'],
+    path: '/trade/bots',
+    text: en(
+      'A performance fee was charged on your trading bot',
+      'A performance fee for {{botLabel}} was charged at {{at}}, for period {{period}}.\n\nThe fee is taken from the gain above the bot\'s previous high-water mark, so a bot that fell and recovered is not charged twice for the same ground. The amount and the journal entry are on the bot\'s settlement history.',
+    ),
+  }),
+  /* ── the two halves of an exchange transfer. micro-org#345 ─────────────────────────────────
+   *
+   * TWO templates and not one with a `{{direction}}` in it. The direction is not an adjective on
+   * one sentence: a deposit ends with money that can be traded and a withdrawal ends with money
+   * back in a wallet balance, and those are the two different things the reader opened the message
+   * to find out. A single template would have had to hedge to cover both, and `withdrawal.stuck` /
+   * `withdrawal.stuck_sent` is the precedent for splitting rather than hedging.
+   *
+   * Neither prints an amount, for the reason `trading.fee_charged` gives above: `settleTransfer`
+   * sends base units of the asset, whose scale is `chainSpec(asset).decimals` and which neither
+   * this service nor `activity` may look up. The ASSET is named, because the code is on the
+   * payload and "your EMBER deposit" is a sentence a reader can match against what they did.
+   * ---------------------------------------------------------------------------------------- */
+  'transfer.exchange_deposit': Object.freeze({
+    id: 'transfer.exchange_deposit',
+    category: 'transfer',
+    params: ['asset', 'at'],
+    path: '/trade/balances',
+    text: en(
+      'Your exchange deposit settled',
+      'Your {{asset}} deposit into the exchange settled at {{at}} and is now available to trade.',
+    ),
+  }),
+  'transfer.exchange_withdrawal': Object.freeze({
+    id: 'transfer.exchange_withdrawal',
+    category: 'transfer',
+    params: ['asset', 'at'],
+    path: '/wallet',
+    // A different `path` from the deposit above, and that is the point of the split rather than a
+    // detail of it: the money is in a different place at the end of each, so the link that would
+    // show the reader their own money is a different link.
+    text: en(
+      'Your exchange withdrawal settled',
+      'Your {{asset}} withdrawal out of the exchange settled at {{at}} and is back in your wallet balance.',
+    ),
+  }),
   'api.key_issued': Object.freeze({
     id: 'api.key_issued',
     category: 'api',

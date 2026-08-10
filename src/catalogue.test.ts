@@ -1622,6 +1622,247 @@ test('the two tessera topics with no rule are each recorded, and never both mapp
   }
 })
 
+/* ── trade's other six. micro-org#345 ──────────────────────────────────────────────────────────
+ *
+ * Six topics were registered at once and TWO of them got rules, so these tests are as much about
+ * the four that did not: a topic silently missing from the table and a topic somebody decided
+ * against look identical from here, and the last test in this block is the one that tells them
+ * apart.
+ *
+ * The payloads below are the ones `trade/src/fees.ts` and `trade/src/transfers.ts` really build,
+ * copied field for field off their emit sites on 2026-08-10 — including the two things that make
+ * these rules awkward: the fee names its user ONLY in the envelope actor, and the transfer names
+ * its asset `asset` while every other producer in this file spells it `assetCode`.
+ * ------------------------------------------------------------------------------------------- */
+
+const BOT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const SETTLEMENT = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+const TRANSFER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+const ENTRY = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+
+/**
+ * `settleFee`'s payload, verbatim — and note what is NOT on it.
+ *
+ * No `userId`, no asset code, and `collected` is Shards: an integer count with no sub-unit, where
+ * 100 is one US dollar (`trade/src/money.ts`). The user is reachable only through the actor, which
+ * `settleFee` builds from the BOT ROW's own `userId` rather than from a caller.
+ */
+function feeSettled(): Record<string, unknown> {
+  return {
+    settlementId: SETTLEMENT,
+    botId: BOT,
+    period: '3',
+    // 1250 Shards is $12.50. Rendered as money it reads as one thousand two hundred and fifty.
+    collected: '1250',
+    entryId: ENTRY,
+  }
+}
+
+/** `settleTransfer`'s payload, verbatim. `amount` is base units of `asset`. */
+function transferSettled(direction: unknown): Record<string, unknown> {
+  return {
+    transferId: TRANSFER,
+    userId: ALICE,
+    asset: 'EMBER',
+    ...(direction === undefined ? {} : { direction }),
+    // 8 decimals, so this is 2.5 EMBER — and notify has no decimals table for any asset.
+    amount: '250000000',
+    entryId: ENTRY,
+  }
+}
+
+/** Drive topic → rule → outcome → template for either trade rule, exactly as the pipeline does. */
+function tradeMail(event: Parameters<typeof outcomeOf>[1]): {
+  userId: string
+  dedupeKey: string
+  subjectUrn: string | null
+  templateId: string
+  priority: string
+  text: string
+  link: string
+} {
+  const rule = RULES[event.topic]
+  assert.ok(rule, `${event.topic} must have a rule`)
+  const set = rule.recipients(event)
+  assert.equal(set.kind, 'recipients')
+  const empty = { userId: '', dedupeKey: '', subjectUrn: null, templateId: '', priority: '', text: '', link: '' }
+  if (set.kind !== 'recipients') return empty
+  const outcome = outcomeOf(rule, event)
+  assert.ok(isTemplateId(outcome.templateId))
+  if (!isTemplateId(outcome.templateId)) return empty
+  const rendered = renderTemplate(
+    templateFor(outcome.templateId),
+    set.recipients[0].params,
+    DEFAULT_LOCALE,
+    'https://app.cloudsforge.test',
+  )
+  assert.deepEqual(rendered.missing, [], `${event.topic}: a gap in a message about money`)
+  return {
+    userId: set.recipients[0].userId,
+    dedupeKey: set.recipients[0].dedupeKey,
+    subjectUrn: set.recipients[0].subjectUrn,
+    templateId: outcome.templateId,
+    priority: outcome.priority,
+    text: `${rendered.subject}\n${rendered.body}`,
+    link: rendered.link,
+  }
+}
+
+test('a performance fee reaches the bot owner through the ACTOR, and is keyed on the settlement', () => {
+  const event = registeredEvent('trade.fee.settled', SETTLEMENT, feeSettled(), {
+    actor: `user:${ALICE}`,
+    occurredAt: '2026-08-10T09:30:00.000Z',
+  })
+  const mail = tradeMail(event)
+  assert.equal(mail.userId, ALICE)
+  // The two assertions that catch a key fallback, as the withdrawal rule above states them. The
+  // key here is the SETTLEMENT — a uuid that is not a person — and `keyedBy` is `settlement_id`,
+  // so `userIdOf`'s key branch is closed and only the actor can answer.
+  assert.notEqual(mail.userId, SETTLEMENT)
+  assert.notEqual(mail.userId, event.key)
+  assert.equal(mail.dedupeKey, `trading.fee_charged:${SETTLEMENT}`)
+  assert.equal(mail.subjectUrn, `cf:trade:bot:${BOT}`)
+  assert.equal(mail.priority, 'high')
+  assert.equal(mail.templateId, 'trading.fee_charged')
+
+  // A redelivery is the same charge, and next period's fee on the same bot is a different one.
+  // Both halves, because a key on the BOT passes the first and a key on `event.id` passes neither.
+  const again = registeredEvent('trade.fee.settled', SETTLEMENT, feeSettled(), { actor: `user:${ALICE}` })
+  assert.notEqual(again.id, event.id)
+  assert.equal(tradeMail(again).dedupeKey, mail.dedupeKey, 'at-least-once delivery became two charges')
+  const next = registeredEvent(
+    'trade.fee.settled',
+    '11111111-2222-4333-8444-555555555555',
+    { ...feeSettled(), settlementId: '11111111-2222-4333-8444-555555555555', period: '4' },
+    { actor: `user:${ALICE}` },
+  )
+  assert.notEqual(tradeMail(next).dedupeKey, mail.dedupeKey, 'two periods deduped into one message')
+})
+
+/**
+ * **Yesterday's payload, fed to today's reader** — the shape this file uses everywhere else.
+ *
+ * `settleFee` is the one emit in trade that carries its user only in the actor, so the failure
+ * that matters here is the reverse of the withdrawal rule's: not a rule that falls back to a key,
+ * but a producer that stops stamping the actor. It answers `no_recipient`, which is a producer to
+ * go and fix, and never the settlement id spelled as a person.
+ */
+test('a fee whose producer stopped stamping the actor is no_recipient, never the settlement id', () => {
+  const event = registeredEvent('trade.fee.settled', SETTLEMENT, feeSettled(), { actor: 'service:trade' })
+  const set = RULES['trade.fee.settled']?.recipients(event)
+  assert.equal(set?.kind, 'none')
+  if (set?.kind !== 'none') return
+  assert.equal(set.reason, 'no_recipient')
+})
+
+test('the fee mail never renders Shards as money — #199 on the newest money path', () => {
+  // `collected` is 1250 Shards for a $12.50 fee, and this service has no scale for any unit: no
+  // contracts-money dependency, no divisor, no formatter. The template takes no amount at all for
+  // that reason, and the period plus the link are what make the charge checkable.
+  const mail = tradeMail(
+    registeredEvent('trade.fee.settled', SETTLEMENT, feeSettled(), { actor: `user:${ALICE}` }),
+  )
+  assert.doesNotMatch(mail.text, /1250|1,250/, 'a Shard count rendered as an amount of money')
+  assert.doesNotMatch(mail.text, /[$€£]\s?\d/, 'a currency figure notify cannot possibly know')
+  assert.doesNotMatch(mail.text, /\d[\d,.]*\s*(USD|EMBER)\b/i, 'an amount notify cannot denominate')
+  // And it still says the two things a reader needs to check the charge themselves.
+  assert.match(mail.text, /period 3\b/, 'the period is the handle a support conversation quotes')
+  assert.match(mail.text, /high-water mark/i, 'the one sentence that stops a "billed twice" ticket')
+  assert.equal(mail.link, 'https://app.cloudsforge.test/trade/bots', 'no link to the settlement history')
+})
+
+test('an exchange transfer is two facts, and the direction picks the sentence AND the link', () => {
+  const deposit = tradeMail(
+    registeredEvent('trade.transfer.settled', TRANSFER, transferSettled('deposit'), {
+      // No actor: `settleTransfer` publishes inside `withOutbox` without one, so the envelope is
+      // `service:trade` and the payload's `userId` is the only route to a person.
+      actor: 'service:trade',
+      occurredAt: '2026-08-10T09:30:00.000Z',
+    }),
+  )
+  const withdrawal = tradeMail(
+    registeredEvent('trade.transfer.settled', TRANSFER, transferSettled('withdrawal'), {
+      actor: 'service:trade',
+      occurredAt: '2026-08-10T09:30:00.000Z',
+    }),
+  )
+  for (const mail of [deposit, withdrawal]) {
+    assert.equal(mail.userId, ALICE)
+    assert.notEqual(mail.userId, TRANSFER, 'the transfer id was spelled as a person')
+    assert.equal(mail.subjectUrn, `cf:trade:transfer:${TRANSFER}`)
+    assert.equal(mail.priority, 'normal')
+    // The asset code comes off `asset`, which is trade's spelling and nobody else's in this file.
+    assert.match(mail.text, /\bEMBER\b/, 'the asset did not come off the payload trade sends')
+    // Base units, for the same reason the fee carries no figure. 250000000 is 2.5 EMBER.
+    assert.doesNotMatch(mail.text, /250000000/, 'a base-unit integer rendered as an amount')
+  }
+  // Two templates, two sentences, two LINKS — the money is in a different place at the end of each,
+  // and the link that would show a reader their own money is therefore a different link.
+  assert.equal(deposit.templateId, 'transfer.exchange_deposit')
+  assert.equal(withdrawal.templateId, 'transfer.exchange_withdrawal')
+  assert.notEqual(deposit.text, withdrawal.text, 'two directions, one message')
+  assert.equal(deposit.link, 'https://app.cloudsforge.test/trade/balances', 'a deposit must link where the money now is')
+  assert.equal(withdrawal.link, 'https://app.cloudsforge.test/wallet', 'a withdrawal must link where the money now is')
+  assert.notEqual(deposit.link, withdrawal.link)
+  assert.match(deposit.text, /available to trade/i)
+  assert.match(withdrawal.text, /back in your wallet balance/i)
+  // And they are two notifications rather than one deduped into silence: a user who deposits and
+  // then withdraws must not lose the second message to the first one's key.
+  assert.notEqual(deposit.dedupeKey, withdrawal.dedupeKey)
+  assert.equal(deposit.dedupeKey, `transfer.exchange_deposit:${TRANSFER}`)
+  assert.equal(withdrawal.dedupeKey, `transfer.exchange_withdrawal:${TRANSFER}`)
+})
+
+test('a transfer whose direction is missing or unrecognised reads as a DEPOSIT, never a withdrawal', () => {
+  // The asymmetry is deliberate: the default is what an event gets when the producer drops the
+  // field or adds a third direction, and telling somebody money arrived where it did not is the
+  // reading that misleads them about where their money is. A withdrawal has to be said.
+  for (const direction of [undefined, '', 'DEPOSIT', 'internal', 'Withdrawal', 7]) {
+    const mail = tradeMail(
+      registeredEvent('trade.transfer.settled', TRANSFER, transferSettled(direction), { actor: 'service:trade' }),
+    )
+    assert.equal(
+      mail.templateId,
+      'transfer.exchange_deposit',
+      `direction ${JSON.stringify(direction)} rendered as a withdrawal on no evidence`,
+    )
+  }
+})
+
+test('the four trade topics with no rule are each a written decision, and never both mapped and recorded', () => {
+  // A topic missing from this catalogue and a topic somebody decided against are indistinguishable
+  // a year later, so the four that got no rule carry the argument at the length of one — and the
+  // length is asserted, because 'noisy' is a label rather than a reason somebody can disagree with.
+  for (const topic of ['trade.bot.created', 'trade.bot.started', 'trade.fill.settled', 'trade.order.filled']) {
+    assert.equal(hasRule(topic), false, `${topic} is recorded as not notifying AND mapped`)
+    const reason = NON_NOTIFYING_TOPICS[topic]
+    assert.ok(reason, `${topic} has no rule and no reason`)
+    assert.ok((reason?.length ?? 0) > 200, `${topic}'s reason is a label, not a decision`)
+    assert.equal(isKnownTopic(topic), true, `${topic} must still be accepted at /ingest`)
+  }
+  // And the two that DID get rules are mapped in exactly one table, from the other direction.
+  for (const topic of ['trade.fee.settled', 'trade.transfer.settled']) {
+    assert.equal(hasRule(topic), true, `${topic} moves money and has no rule`)
+    assert.equal(
+      Object.hasOwn(NON_NOTIFYING_TOPICS, topic),
+      false,
+      `${topic} is both mapped and recorded as not notifying — the coverage table can only mean one`,
+    )
+  }
+  // All seven are registered, so none of them is riding the quarantine that used to hold six.
+  for (const topic of [
+    'trade.bot.created',
+    'trade.bot.started',
+    'trade.bot.paused',
+    'trade.fill.settled',
+    'trade.fee.settled',
+    'trade.order.filled',
+    'trade.transfer.settled',
+  ]) {
+    assert.equal(isRegisteredTopic(topic), true, `${topic} is not in the registry`)
+  }
+})
+
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
    THE SEAM, DRIVEN FROM THE PRODUCER'S OWN SOURCE.
 
