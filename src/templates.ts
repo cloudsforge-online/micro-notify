@@ -896,3 +896,72 @@ export function renderTemplate(
   const link = new URL(path, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`).toString()
   return { subject, body, link, missing: [...missing] }
 }
+
+/** A stored notification reduced to the two things a screen needs in order to draw a row. */
+export interface Described {
+  /** The template's subject, substituted. Never the template id, unless the template is gone. */
+  readonly title: string
+  /**
+   * Where the row points, RELATIVE — `/settings/security/devices`, never an origin.
+   *
+   * Null when there is nowhere honest to point. See `describeNotification` for the two cases.
+   */
+  readonly href: string | null
+}
+
+/**
+ * The words a notification carries when it is READ, rather than when it is delivered.
+ *
+ * ── WHY THIS EXISTS AT ALL ─────────────────────────────────────────────────────────────────────
+ *
+ * `GET /notifications` used to answer with a template id and a parameter bag and nothing else, and
+ * "the only place a user-visible sentence is written" (this file's header) was therefore reachable
+ * only by the dispatch path. Any screen wanting to draw a notification had to hold its own copy of
+ * these subjects — a second set of the estate's words, in a bundle, free to drift from these. The
+ * measurement that made it urgent is micro-org #415: hub-api now composes a `notifications` tile
+ * for every signed-in Overview, and the estate's live rows are `account.registered`,
+ * `account.verify_email` and `security.password_reset` — three sentences that exist here and
+ * nowhere a client can see.
+ *
+ * So the words come from here, over the wire, and the SPA renders `title` without knowing what a
+ * template is.
+ *
+ * ── WHY `href` IS RELATIVE, AND WHY IT IS SOMETIMES NULL ───────────────────────────────────────
+ *
+ * Relative because the reader's origin is the reader's business: `renderTemplate` builds an
+ * absolute `link` against `NOTIFY_PUBLIC_URL` because it is going into an email, where there is no
+ * origin to be relative to. A row in a signed-in SPA has one, and hub-api's own rule for deep
+ * links — "the SPA owns its own origin" (`nextactions.ts`) — is the same rule.
+ *
+ * Null in two cases, both of which would otherwise produce a link that lies:
+ *
+ *   1. **The template is gone.** A deploy may remove a template while rows referencing it remain.
+ *      The title degrades to the template id, exactly as `messageFor` does for a pending delivery,
+ *      rather than throwing — and there is no path to point at.
+ *   2. **The path IS a credential.** `account.verify_email` declares `path: '{{verifyUrl}}'` and
+ *      `verifyUrl` as a `secretParams`, so by the time a row reaches this function `store.ts` has
+ *      already replaced that parameter with `[redacted]` — the whole point of that redaction. A
+ *      naive substitution here would emit `href: '/[redacted]'`, a dead link on the single most
+ *      important notification the platform sends, and it would do it silently. The check is
+ *      declarative — does the path reference a parameter the template calls secret — rather than a
+ *      scan for the marker, so it holds for a template that has not been written yet.
+ */
+export function describeNotification(
+  templateId: string,
+  params: Record<string, unknown>,
+  locale: Locale,
+): Described {
+  if (!isTemplateId(templateId)) return { title: templateId, href: null }
+  const template = templateFor(templateId)
+  const text = template.text[locale] ?? template.text[DEFAULT_LOCALE]
+  // Discarded rather than reported: a caller reading its own notifications can do nothing about a
+  // missing parameter, and the dispatch path already logs the names when it renders for delivery.
+  const missing = new Set<string>()
+  const title = substitute(text.subject, params, missing)
+
+  const referenced = new Set<string>()
+  for (const [, name] of template.path.matchAll(PLACEHOLDER)) referenced.add(name as string)
+  const pathIsCredential = (template.secretParams ?? []).some((name) => referenced.has(name))
+
+  return { title, href: pathIsCredential ? null : substitute(template.path, params, missing) }
+}

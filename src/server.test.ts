@@ -311,6 +311,36 @@ test('marking a notification read returns it; someone elses is a 404, not a 403'
   assert.equal(missing.status, 404)
 })
 
+test('a notification is served with the words a screen needs, not just a template id', async () => {
+  // The read route used to answer with `templateId` and a parameter bag and nothing else, so any
+  // screen drawing a notification had to hold its own copy of the estate's sentences. hub-api now
+  // composes a `notifications` tile for every signed-in Overview (micro-org #415) and renders
+  // `title` verbatim, so the absence of this field is the absence of the feature.
+  const rig = await start()
+  const response = await fetch(`${rig.url}/notifications`, {
+    headers: { authorization: 'Bearer t' },
+  })
+  assert.equal(response.status, 200)
+  const body = (await response.json()) as {
+    notifications: { templateId: string; title: string; href: string | null }[]
+  }
+  const first = body.notifications[0]
+  assert.equal(first?.title, 'A private key left the platform')
+  assert.equal(first?.href, '/settings/security/exports')
+  // Additive: every field the old response carried is still there, under the same name.
+  assert.equal(first?.templateId, 'security.key_exported')
+
+  // The same mapper on both read routes. Two mappers is one mapper away from a route that answers
+  // with a different shape, and the one that drifts is always the one nobody looks at.
+  const read = await fetch(`${rig.url}/notifications/55555555-5555-4555-8555-555555555555/read`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer t' },
+  })
+  const marked = (await read.json()) as { notification: { title: string; href: string | null } }
+  assert.equal(marked.notification.title, 'A private key left the platform')
+  assert.equal(marked.notification.href, '/settings/security/exports')
+})
+
 test('an out-of-range limit is a 400', async () => {
   const rig = await start()
   const response = await fetch(`${rig.url}/notifications?limit=1000`, {
