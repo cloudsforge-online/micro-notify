@@ -230,6 +230,32 @@ export const FAILURE_REASONS = [
    * message was dead-lettered by a condition that would have cleared on its own.
    */
   'quota_exhausted',
+
+  /**
+   * The address is under a domain the standards reserve, so no mail exchanger for it can exist.
+   *
+   * ## Why this is not `rejected`
+   *
+   * It was, and `rejected` is written by five different call sites: a push gateway answering 4xx,
+   * a webhook endpoint answering 410, a webhook endpoint answering anything else, an SMTP 5xx, and
+   * this. An operator alerting on the one that matters could not select it, and the one that
+   * matters is the only one of the five that should be **impossible**.
+   *
+   * `pipeline.ts` declines to route email to a reserved domain, so nothing reaches the adapter's
+   * guard on the live path. The guard firing therefore means the routing rule was bypassed — a
+   * delivery row written before the rule shipped, a caller building an `OutboundMessage` some
+   * other way, or a build that lost `reserved.ts`. That third case is the one with teeth: measured
+   * on mainnet 2026-08-11, 1,535 of 1,552 email deliveries in seven days went to `beacon.test`
+   * because the running process predated the rule, and the only reason anyone noticed was a
+   * provider dashboard reading 241 against a 150/day allowance. micro-org#390.
+   *
+   * So this reason exists to be alerted on at **greater than zero**, which is a threshold no other
+   * failure reason here can carry.
+   *
+   * Not retryable, for the same reason `no_transport` is not: no number of attempts makes
+   * `beacon.test` resolvable, and each attempt is a unit of an allowance real recipients share.
+   */
+  'reserved_domain',
 ] as const
 
 export type FailureReason = (typeof FAILURE_REASONS)[number]
