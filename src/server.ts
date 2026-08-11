@@ -61,8 +61,8 @@ import {
 } from './model.ts'
 import { ingestEvent, type PipelineDeps } from './pipeline.ts'
 import type { Preference } from './routing.ts'
-import type { NotifyStore } from './store.ts'
-import { isTemplateId, templateFor } from './templates.ts'
+import type { Notification, NotifyStore } from './store.ts'
+import { describeNotification, isTemplateId, templateFor } from './templates.ts'
 
 /** The verifier as this file needs it. An interface, so a test does not need a JWKS. */
 export interface PrincipalVerifier {
@@ -330,7 +330,10 @@ function buildRoutes(): Route[] {
             cursor: ctx.url.searchParams.get('cursor'),
             unreadOnly: ctx.url.searchParams.get('unread') === 'true',
           })
-          return { status: 200, body: page }
+          return {
+            status: 200,
+            body: { ...page, notifications: page.notifications.map(readable) },
+          }
         } finally {
           done()
         }
@@ -352,7 +355,7 @@ function buildRoutes(): Route[] {
           if (!notification) {
             return errorReply(404, 'not_found', 'no such notification', ctx.requestId)
           }
-          return { status: 200, body: { notification } }
+          return { status: 200, body: { notification: readable(notification) } }
         } finally {
           done()
         }
@@ -609,6 +612,37 @@ export class BadRequestError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'BadRequestError'
+  }
+}
+
+/**
+ * A stored notification, plus the two fields a screen cannot compute for itself.
+ *
+ * `Notification` is what this service REMEMBERS; this is what it SAYS. The extra pair is derived
+ * on the way out rather than stored, because a subject rewritten in `templates.ts` must change the
+ * words on every row that has ever referenced it — a copy in the table would freeze the sentence
+ * at the moment it was written and there would be no way to correct a typo in an old one.
+ *
+ * Additive, deliberately: every existing field keeps its name and shape, so a consumer reading the
+ * old response is not broken by this and a consumer reading the new one does not have to wait for
+ * a coordinated release. See `describeNotification` for why `href` can be null.
+ */
+export interface ReadableNotification extends Notification {
+  readonly title: string
+  readonly href: string | null
+}
+
+/**
+ * The one place a stored row becomes something a caller can read.
+ *
+ * Both read routes go through it, for the same reason `toNotification` is the single redaction
+ * point in `store.ts`: two mappers is one mapper away from a route that answers with a different
+ * shape, and the one that would drift is always the one nobody looks at.
+ */
+function readable(notification: Notification): ReadableNotification {
+  return {
+    ...notification,
+    ...describeNotification(notification.templateId, notification.params, notification.locale),
   }
 }
 

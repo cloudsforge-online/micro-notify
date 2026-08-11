@@ -4,7 +4,15 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { REDACTED, TEMPLATES, TEMPLATE_IDS, redactSecretParams, renderTemplate, templateFor } from './templates.ts'
+import {
+  REDACTED,
+  TEMPLATES,
+  TEMPLATE_IDS,
+  describeNotification,
+  redactSecretParams,
+  renderTemplate,
+  templateFor,
+} from './templates.ts'
 import { DEFAULT_LOCALE, LOCALES, resolveLocale } from './model.ts'
 
 const BASE = 'https://app.cloudsforge.test'
@@ -125,6 +133,53 @@ test('a secret parameter is redacted visibly, and nothing beside it is touched',
   const plain = { walletLabel: 'Main wallet' }
   assert.deepEqual(redactSecretParams('security.key_exported', plain), plain)
   assert.deepEqual(redactSecretParams('a.template.that.was.deleted', plain), plain)
+})
+
+/* ------------------------------------------------------------------ describeNotification */
+
+test('a described notification carries the template subject and a relative path', () => {
+  // The words come from here rather than from a copy in a bundle: hub-api composes a
+  // `notifications` tile from this response and the SPA renders `title` without knowing what a
+  // template is (micro-org #415).
+  const described = describeNotification(
+    'security.key_exported',
+    { walletLabel: 'Main wallet', at: '2026-07-30 04:12 UTC' },
+    'en-GB',
+  )
+  assert.equal(described.title, 'A private key left the platform')
+  // Relative, and it stays relative: the reader's origin is the reader's business, which is the
+  // same rule hub-api applies to its own deep links.
+  assert.equal(described.href, '/settings/security/exports')
+})
+
+test('a notification whose path IS a credential is described with no link at all', () => {
+  // `account.verify_email` declares `path: '{{verifyUrl}}'` and `verifyUrl` as a secret parameter,
+  // so by the time a row reaches a reader `store.ts` has already replaced that value. Substituting
+  // it anyway would emit `/[redacted]` — a dead link on the most important notification the
+  // platform sends, presented as a working one.
+  const described = describeNotification(
+    'account.verify_email',
+    { handle: 'alice', verifyUrl: REDACTED },
+    'en-GB',
+  )
+  assert.equal(described.title, 'Confirm your email address')
+  assert.equal(described.href, null)
+  assert.equal(JSON.stringify(described).includes(REDACTED), false)
+})
+
+test('a template a deploy has removed degrades to its id rather than throwing', () => {
+  // The same degradation `messageFor` makes for a pending delivery: a template can be removed
+  // while rows referencing it remain, and the correct answer is a slightly ugly notification.
+  const described = describeNotification('a.template.that.was.deleted', {}, 'en-GB')
+  assert.equal(described.title, 'a.template.that.was.deleted')
+  assert.equal(described.href, null)
+})
+
+test('a described notification with missing parameters blanks them and still has a title', () => {
+  const described = describeNotification('account.registered', {}, 'en-GB')
+  assert.equal(described.title, 'Welcome to CloudsForge')
+  assert.doesNotMatch(described.title, /\{\{/)
+  assert.equal(described.href, '/')
 })
 
 test('the security templates say what to do, not just what happened', () => {
