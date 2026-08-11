@@ -258,6 +258,65 @@ function channelsAvailable(
 }
 
 /**
+ * The canary address the self-check below routes. Reserved by RFC 6761 §6, so it can never resolve.
+ *
+ * It is not `beacon.test` on purpose. The rule this proves is about the standards and not about the
+ * monitor's chosen name (see `reserved.ts`), and a canary spelled `beacon.test` would go on passing
+ * for a build whose rule had been narrowed to a deny-list — which is the exact regression the rule
+ * is written the way it is to prevent.
+ */
+export const GUARD_CANARY_ADDRESS = 'reserved-domain-canary@cf-guard-canary.invalid'
+
+/**
+ * Does the RUNNING build still refuse to route email to a reserved domain?
+ *
+ * ## Why a metric and not a test
+ *
+ * `reserved.test.ts` proves the rule is correct in the tree. It says nothing about the process
+ * answering on port 4108, and that gap is the whole of micro-org#390: the rule had been merged
+ * since 2.4.0, was verified in CI, was verified on testnet — and the mainnet `notify` process was
+ * an older image that did not contain it. It sent 1,535 messages to `beacon.test` over six days,
+ * emptied a 150/day allowance, and no signal anywhere said so. The estate found out from the
+ * provider's dashboard.
+ *
+ * The alert that shipped first (`MailSentToReservedDomain`) watches
+ * `notify_failed_total{reason="reserved_domain"}` — the backstop in `email.ts`. Measured on mainnet
+ * on 2026-08-11 that counter is **zero over seven days**, and it is zero for a good reason: the
+ * routing rule below drops the channel before a delivery row is written, so on the live path
+ * nothing ever reaches the backstop. A build that lost the rule ENTIRELY loses the backstop with
+ * it — nothing increments, and the one alert that exists cannot fire in precisely the case it was
+ * written for. It detects half a regression and is silent for the whole one.
+ *
+ * ## What this does instead
+ *
+ * It drives `channelsAvailable` — the real routing decision, not `isUndeliverableAddress` in
+ * isolation — with a synthetic target under a reserved domain, and reports whether `email` came
+ * back. Calling the routing function rather than the predicate is the load-bearing part: deleting
+ * the `continue` above leaves `reserved.ts` untouched and every one of its unit tests green, and
+ * this is the check that goes red for it.
+ *
+ * `true` means the running process refuses. `false` means it would route mail to an address that
+ * cannot exist, and the allowance starts draining on the next notification. The gauge derived from
+ * it is `notify_reserved_domain_guard`, and it is answered at every scrape — so a build that lost
+ * the rule is identified within one scrape interval, before any mail is sent, rather than six days
+ * later from a billing page.
+ *
+ * Pure, allocates two small objects, and touches no database: cheap enough to answer on the scrape
+ * path, which is where it has to be answered. A boot-time check would report the build that booted
+ * and go on reporting it after a rolling replacement put a different one behind the same name.
+ */
+export function reservedDomainGuardIntact(): boolean {
+  const canary: ChannelTarget = {
+    id: '00000000-0000-4000-8000-000000000000',
+    channel: 'email',
+    address: GUARD_CANARY_ADDRESS,
+    secret: null,
+    label: null,
+  }
+  return !channelsAvailable([canary], null).includes('email')
+}
+
+/**
  * A single-use credential is delivered now, whatever cadence the reader asked for.
  *
  * ## The failure this exists to stop, which every other guard is quiet about
