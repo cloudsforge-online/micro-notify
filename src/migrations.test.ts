@@ -59,13 +59,32 @@ test('a released migration does not re-render when a type it generated from grow
 
 test('every failure reason this build can write is admitted by some migration', () => {
   // The constraint is what turns "a reason the code emits but the schema refuses" from a rejected
-  // insert at three in the morning into a failed test. `quota_exhausted` is the first value to
-  // arrive after version 5, and it arrives in version 8.
-  const widened = MIGRATIONS.find((m) => m.name === 'quota-exhausted-reason')?.up ?? ''
+  // insert at three in the morning into a failed test.
+  //
+  // The NEWEST widening is what has to admit the whole live union, and it is found by what it does
+  // rather than by its name. Naming it pinned this test to `quota-exhausted-reason`, so version 9
+  // adding `reserved_domain` failed here against version 8's text — a true failure reported against
+  // the wrong migration, which is the same shape of confusion the frozen-list note in
+  // `migrations.ts` exists to prevent. A third reason should need no edit to this test at all.
+  const widenings = MIGRATIONS.filter((m) => /add constraint deliveries_reason_check/.test(m.up))
+  const widened = widenings[widenings.length - 1]?.up ?? ''
+  assert.ok(widenings.length >= 2, 'the reason constraint is widened by its own migration each time')
   for (const reason of FAILURE_REASONS) assert.match(widened, new RegExp(`'${reason}'`))
   // Expand-only: it drops the old constraint by name and adds one that is a superset, so a replica
   // of the previous release writing `upstream_error` against this schema is unaffected.
   assert.match(widened, /drop constraint if exists deliveries_reason_check/)
+
+  // And EVERY earlier widening still renders exactly what it rendered when it was applied. This is
+  // the assertion that would have caught version 8 interpolating the live union: adding a value
+  // rewrites an applied migration's text, `@cloudsforge/db` checksums that text, and the service
+  // then refuses to boot with a message about a migration nobody touched.
+  for (const earlier of widenings.slice(0, -1)) {
+    assert.doesNotMatch(
+      earlier.up,
+      /'reserved_domain'/,
+      `${earlier.name} renders a value added after it shipped; it must render a frozen list`,
+    )
+  }
 })
 
 test('the two constraints that encode §10.3 are present in the migration text', () => {

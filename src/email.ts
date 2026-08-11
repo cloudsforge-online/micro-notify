@@ -91,8 +91,15 @@ export function emailAdapter(options: EmailOptions): ChannelAdapter {
       // Permanent, not retryable, and that is the whole point: no number of attempts makes
       // `beacon.test` resolvable, `deliveries.max_attempts` is 6, and each of those six is a unit of
       // an allowance real recipients share. Retrying here is how one synthetic account costs six.
+      //
+      // The reason is `reserved_domain` and not `rejected` because reaching this line AT ALL is
+      // the alarm. `rejected` is written by five call sites across push, webhook and SMTP, all of
+      // which are ordinary upstream refusals; this one is the only failure in the set that should
+      // be impossible, so it gets a series an operator can threshold at greater than zero.
+      // micro-org#390 — where the rule was in the tree and the running process did not have it,
+      // and nothing anywhere said so for six days.
       if (isUndeliverableAddress(message.address)) {
-        return failure('rejected', false, 'reserved domain; no mail exchanger can exist (RFC 6761 §6, RFC 2606 §3)')
+        return failure('reserved_domain', false, 'reserved domain; no mail exchanger can exist (RFC 6761 §6, RFC 2606 §3)')
       }
 
       try {

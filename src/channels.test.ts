@@ -122,9 +122,46 @@ test('a reserved domain is rejected permanently and never reaches the transport'
   const outcome = await adapter.send(message({ address: 'beacon+9f2a@beacon.test' }))
   assert.equal(outcome.ok, false)
   if (outcome.ok) return
-  assert.equal(outcome.reason, 'rejected')
+  assert.equal(outcome.reason, 'reserved_domain')
   assert.equal(outcome.retryable, false, 'no number of attempts makes a reserved domain resolvable')
   assert.equal(sent.length, 0, 'nothing was handed to a transport, so nothing was charged')
+})
+
+test('the reserved-domain refusal is DISTINGUISHABLE from every other permanent refusal', async () => {
+  // The point of the reason, and the mutation this kills. Reverting `reserved_domain` to
+  // `rejected` leaves the test above passing on `ok`, `retryable` and `sent.length` — every
+  // property that describes the BEHAVIOUR is unchanged, because the behaviour was already right.
+  // What breaks is the only thing that was ever wrong: an operator's ability to select this one
+  // series out of the five call sites that write `rejected`, and to alert on it above zero.
+  //
+  // micro-org#390: for six days on mainnet the rule was in the tree, the running process did not
+  // have it, 1,535 of 1,552 deliveries in a week went to `beacon.test`, and the first thing that
+  // noticed was a provider dashboard reading 241 against a 150/day allowance. A counter nobody can
+  // select is a counter nobody alerts on.
+  const adapter = emailAdapter({
+    smtp: { ...UNCONFIGURED, host: 'smtp.example.test', from: 'CloudsForge <no-reply@cloudsforge.online>' },
+    transport: async () => ({
+      // A transport that refuses with a 5xx, which is the OTHER permanent SMTP refusal and the one
+      // this must not be confused with.
+      async sendMail() {
+        throw Object.assign(new Error('SMTP 550 mailbox unavailable'), { responseCode: 550 })
+      },
+    }),
+  })
+
+  const reserved = await adapter.send(message({ address: 'beacon+9f2a@beacon.test' }))
+  const refused = await adapter.send(message({ address: 'someone@cloudsforge.online' }))
+
+  assert.equal(reserved.ok, false)
+  assert.equal(refused.ok, false)
+  if (reserved.ok || refused.ok) return
+  assert.equal(reserved.reason, 'reserved_domain')
+  assert.equal(refused.reason, 'rejected')
+  assert.notEqual(
+    reserved.reason,
+    refused.reason,
+    'an address that can never exist and a mailbox that refused share one label again',
+  )
 })
 
 test('a configured transport is handed a plain-text message and the link', async () => {

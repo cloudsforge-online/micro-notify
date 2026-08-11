@@ -74,6 +74,26 @@ const FAILURE_REASONS_AT_5: readonly string[] = [
   'upstream_error',
 ]
 
+/**
+ * The failure reasons as version 8 rendered them, frozen — **never edit this list**.
+ *
+ * Version 8 was written to fix the version 5 trap and interpolated `sqlValues(FAILURE_REASONS)`
+ * itself, which re-armed it one migration later: the next value added to the union would have
+ * rewritten the text of a migration every database in the estate had already applied, and
+ * `migrate` would have refused to boot the service with a message about version 8. Found on
+ * 2026-08-11 while adding `reserved_domain`, before it fired.
+ *
+ * The values below are byte-identical to what version 8 rendered, so freezing them changes no
+ * checksum. Every later addition arrives as its own migration, and `migrations.test.ts` asserts
+ * this list is a prefix of the live one — so a reason can still be added, and cannot be quietly
+ * removed or reordered underneath a released constraint.
+ *
+ * **The rule, stated once so the next person does not have to rediscover it twice: a migration
+ * that renders a generated list must render a FROZEN copy of it.** Reaching for the live constant
+ * is correct everywhere else in this file and wrong here.
+ */
+const FAILURE_REASONS_AT_8: readonly string[] = [...FAILURE_REASONS_AT_5, 'quota_exhausted']
+
 export const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -323,6 +343,30 @@ export const MIGRATIONS: readonly Migration[] = [
       -- 'if exists' rather than a bare drop: a database built by a future consolidated baseline
       -- may not carry that auto-generated name, and a migration that fails on a database with no
       -- constraint to remove would be a boot failure over a constraint that was already correct.
+      alter table deliveries drop constraint if exists deliveries_reason_check;
+      alter table deliveries
+        add constraint deliveries_reason_check
+        check (reason is null or reason in (${sqlValues(FAILURE_REASONS_AT_8)}));
+    `,
+  },
+  {
+    version: 9,
+    name: 'reserved-domain-reason',
+    up: `
+      -- Widen deliveries.reason to admit 'reserved_domain' — micro-org#390.
+      --
+      -- An expand, like version 8 and for the same reason: every value version 8 admitted is still
+      -- admitted, so a replica of the older code is unaffected and a rollback needs nothing.
+      --
+      -- This value exists to be ALERTED ON ABOVE ZERO. \`pipeline.ts\` declines to route email to a
+      -- reserved domain, so a row carrying this reason means the routing rule did not run — which
+      -- is what happened on mainnet between 2026-08-05 and 2026-08-11, when the deployed process
+      -- predated the rule and spent the whole mail allowance on \`beacon.test\`. The database is the
+      -- durable half of that signal; the counter label is the half that pages.
+      --
+      -- Dropped by name with 'if exists' for the same reason version 8 gives: a database built
+      -- from a future consolidated baseline may not carry the auto-generated name, and failing on
+      -- a constraint that was already correct would be a boot failure over nothing.
       alter table deliveries drop constraint if exists deliveries_reason_check;
       alter table deliveries
         add constraint deliveries_reason_check
