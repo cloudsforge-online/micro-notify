@@ -30,6 +30,7 @@ import type {
   SuppressionReason,
 } from './model.ts'
 import type { Preference, Route } from './routing.ts'
+import { isUndeliverableAddress } from './reserved.ts'
 import { redactSecretParams } from './templates.ts'
 
 export type Db = Sql
@@ -797,6 +798,53 @@ export async function deliveryStats(sql: Db): Promise<{
     overdue: row?.overdue ?? 0,
     awaitingAllowance: row?.awaiting_allowance ?? 0,
   }
+}
+
+/**
+ * How many email deliveries were ROUTED to a reserved domain in the last `windowMs`?
+ *
+ * ## Why a delivery row and not a send
+ *
+ * The question an operator needs answered is "did the routing rule run", and the answer is the
+ * existence of the row, not its outcome. Measured on mainnet 2026-08-11 (micro-org#390), the leak
+ * wrote **1,535** delivery rows to `beacon.test` of which only **418** were ever `sent` — the rest
+ * died against an allowance the first 418 had already emptied. Counting sends would have seen a
+ * quarter of the damage and would have gone quiet at exactly the moment it got worst, because the
+ * signal that mail is leaking is suppressed by the mail having already leaked. A row exists the
+ * moment `channelsAvailable` returns `email` for an address that cannot receive it, which is the
+ * fact itself.
+ *
+ * ## Why it is grouped by domain and filtered in TypeScript
+ *
+ * `isUndeliverableAddress` is the one place the rule lives, and re-spelling it as a SQL `like` list
+ * would be a second copy to drift — this file would then be able to disagree with `reserved.ts`
+ * about what "reserved" means, and the disagreement would present as an alert that does not fire.
+ *
+ * Grouping by domain first keeps that honest and keeps the scrape bounded: the estate holds 13,243
+ * `beacon.test` targets and four distinct recipient domains, so this returns single-figure rows
+ * whatever the volume. Rows with an empty domain are dropped rather than counted — a malformed
+ * address is `no_address`'s business, and counting it here would raise an alert about the reserved
+ * -domain rule for a defect that has nothing to do with it.
+ */
+export async function reservedDomainDeliveries(sql: Db, windowMs: number): Promise<number> {
+  const rows = await sql<Array<{ domain: string | null; n: number }>>`
+    select lower(split_part(t.address, '@', 2)) as domain,
+           count(*)::int                        as n
+      from deliveries d
+      join channel_targets t on t.id = d.target_id
+     where d.channel = 'email'
+       and d.created_at > now() - (${windowMs}::bigint * interval '1 millisecond')
+     group by 1
+  `
+  let total = 0
+  for (const row of rows) {
+    const domain = row.domain
+    if (!domain) continue
+    // A synthetic local part, because the column holds the domain alone. The rule is a statement
+    // about the domain, so any legal local part answers the same question.
+    if (isUndeliverableAddress(`probe@${domain}`)) total += row.n
+  }
+  return total
 }
 
 /* ------------------------------------------------------------------ digests */

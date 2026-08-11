@@ -25,6 +25,19 @@ export const DELIVERIES_PENDING = 'notify_deliveries_pending'
 export const DELIVERIES_DEAD = 'notify_deliveries_dead'
 export const DIGESTS_OPEN = 'notify_digests_open'
 export const AWAITING_ALLOWANCE = 'notify_deliveries_awaiting_allowance'
+export const RESERVED_DOMAIN_GUARD = 'notify_reserved_domain_guard'
+export const RESERVED_DOMAIN_DELIVERIES = 'notify_deliveries_reserved_domain'
+
+/**
+ * How far back `notify_deliveries_reserved_domain` looks.
+ *
+ * One hour, and the length is doing two jobs. It has to outlast a scrape gap — a gauge that is only
+ * true for the sixty seconds after the row is written can be missed entirely by a Prometheus that
+ * fell behind, and an alert that depends on being lucky is not an alert. And it has to be short
+ * enough that the alert CLEARS by itself once the leak is fixed, so the next occurrence is a fresh
+ * page rather than a series somebody silenced a week ago and stopped reading.
+ */
+export const RESERVED_DOMAIN_WINDOW_MS = 60 * 60_000
 
 export function registerServiceMetrics(metrics: Metrics): Metrics {
   return metrics
@@ -104,6 +117,32 @@ export function registerServiceMetrics(metrics: Metrics): Metrics {
       // Alert on it above zero for longer than one allowance period. Above zero for minutes is
       // the system working: the delivery is parked and will go out when the allowance resets.
       help: 'Deliveries parked because the mail provider\'s sending allowance is spent — NOT a credentials failure',
+      kind: 'gauge',
+    })
+    .register({
+      name: RESERVED_DOMAIN_GUARD,
+      // ── THE BRACES. THE BELT IS `reserved.ts`, AND THE BELT WAS ALREADY THERE. ──
+      //
+      // micro-org#390: the rule refusing mail to a reserved domain had been in the tree since
+      // 2.4.0, green in CI, and verified on testnet. The mainnet process was an older image that
+      // did not contain it, and NOTHING SAID SO for six days while it emptied the daily allowance
+      // and a real visitor's verification mail could not be sent at all.
+      //
+      // 1 means the RUNNING build refuses; 0 means it would route mail to an address the DNS root
+      // guarantees can never resolve. Answered at every scrape by driving the real routing
+      // function (`reservedDomainGuardIntact`), so the answer is about this process and not about
+      // the repository — which is the entire distinction the ticket turns on. Alert on `== 0`, and
+      // alert on the series being ABSENT while the service is up: a build old enough to have lost
+      // the rule has lost this metric with it, and absence is then the only evidence there is.
+      help: '1 if this running build still refuses to route email to a reserved domain (RFC 6761 §6), 0 if it would send',
+      kind: 'gauge',
+    })
+    .register({
+      name: RESERVED_DOMAIN_DELIVERIES,
+      // The ground truth beside the self-check above: not "can it happen" but "did it". A delivery
+      // row for a reserved recipient means the routing rule did not run for that notification,
+      // whatever the guard says about the canary. Correct value is zero, forever.
+      help: 'Email deliveries ROUTED to a reserved domain in the last hour — nonzero means the routing rule did not run',
       kind: 'gauge',
     })
 }

@@ -29,14 +29,17 @@ import {
   DELIVERIES_DEAD,
   DELIVERIES_PENDING,
   DIGESTS_OPEN,
+  RESERVED_DOMAIN_DELIVERIES,
+  RESERVED_DOMAIN_GUARD,
+  RESERVED_DOMAIN_WINDOW_MS,
 } from './metrics.ts'
 import { createServer } from './server.ts'
 import { BROADCAST_KIND, DISPATCH_KIND, registerHandlers, rescheduleRecurring, seedRecurring } from './jobs.ts'
 import { emailAdapter, smtpConfigured } from './email.ts'
 import { gatewayAdapter, inAppAdapter, registryOf } from './channels.ts'
 import { webhookAdapter } from './webhook.ts'
-import { deliveryStats, openDigestCount, postgresNotifyStore } from './store.ts'
-import type { PipelineDeps } from './pipeline.ts'
+import { deliveryStats, openDigestCount, postgresNotifyStore, reservedDomainDeliveries } from './store.ts'
+import { reservedDomainGuardIntact, type PipelineDeps } from './pipeline.ts'
 
 // 1. Environment. Importing `./env.ts` validated it; a missing or placeholder secret has already
 //    exited with a structured line naming the variable.
@@ -172,6 +175,12 @@ const server = createServer({
     metrics.set(DELIVERIES_DEAD, deliveries.undeliverable, { state: 'undeliverable' })
     metrics.set(AWAITING_ALLOWANCE, deliveries.awaitingAllowance)
     metrics.set(DIGESTS_OPEN, await openDigestCount(sql))
+    // micro-org#390. Answered HERE, at scrape time, and not once at boot: a boot-time answer
+    // describes the build that booted, and a rolling replacement puts a different build behind the
+    // same service name without ever booting this line again. The question is "does the process
+    // being scraped right now still refuse", so it is asked of the process being scraped right now.
+    metrics.set(RESERVED_DOMAIN_GUARD, reservedDomainGuardIntact() ? 1 : 0)
+    metrics.set(RESERVED_DOMAIN_DELIVERIES, await reservedDomainDeliveries(sql, RESERVED_DOMAIN_WINDOW_MS))
   },
 })
 
