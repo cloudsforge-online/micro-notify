@@ -1646,14 +1646,23 @@ const ENTRY = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
  * No `userId`, no asset code, and `collected` is Shards: an integer count with no sub-unit, where
  * 100 is one US dollar (`trade/src/money.ts`). The user is reachable only through the actor, which
  * `settleFee` builds from the BOT ROW's own `userId` rather than from a caller.
+ *
+ * `due` and `status` arrived with micro-org#367 (micro-trade `ee5e189`), and `status` is the ONLY
+ * parameter, on purpose. See the pair of tests below: two payloads that differed in `collected` as
+ * well would let a rule that ignored `status` and subtracted the two figures itself pass both, and
+ * that rule is precisely the one `isPartialCollection` argues against writing. Omitting the
+ * argument omits the FIELD, which is yesterday's payload — every `trade.fee.settled` emitted before
+ * that commit, and any replay of one.
  */
-function feeSettled(): Record<string, unknown> {
+function feeSettled(status?: unknown): Record<string, unknown> {
   return {
     settlementId: SETTLEMENT,
     botId: BOT,
     period: '3',
     // 1250 Shards is $12.50. Rendered as money it reads as one thousand two hundred and fifty.
     collected: '1250',
+    due: '1250',
+    ...(status === undefined ? {} : { status }),
     entryId: ENTRY,
   }
 }
@@ -1769,6 +1778,97 @@ test('the fee mail never renders Shards as money — #199 on the newest money pa
   assert.match(mail.text, /period 3\b/, 'the period is the handle a support conversation quotes')
   assert.match(mail.text, /high-water mark/i, 'the one sentence that stops a "billed twice" ticket')
   assert.equal(mail.link, 'https://app.cloudsforge.test/trade/bots', 'no link to the settlement history')
+})
+
+/**
+ * micro-org#367 item 2, from this end. **Asserted as a PAIR, and the pair is the whole test.**
+ *
+ * The defect was that a partial collection and a full one produced byte-identical mail: the payload
+ * carried no `status`, so "A performance fee was charged on your trading bot" went out to a
+ * customer whose balance had covered a twentieth of it and who still owed the rest. trade closed
+ * the producer half in `ee5e189`; this is the consumer half, and the failure it has to be able to
+ * see is not "the partial branch is missing" but "the branch exists and both sides reach the same
+ * template" — which a test driving only the partial cannot see at all, because a rule with
+ * `templateId` hard-coded to either value passes it.
+ *
+ * So both are driven, through the same helper the pipeline uses, and the two events differ in
+ * `status` and in NOTHING ELSE: same settlement, same bot, same period, same `collected`, same
+ * `due`, same timestamp. That kills a constant template id from either side, and it additionally
+ * kills the implementation that looks like the obvious one — comparing `collected` with `due` here
+ * instead of reading the verdict the producer wrote next to the row — because on these two payloads
+ * that comparison gives the same answer twice.
+ */
+test('a fee that could not be collected in full says so, and a full one says something else', () => {
+  const at = '2026-08-11T09:30:00.000Z'
+  const full = tradeMail(
+    registeredEvent('trade.fee.settled', SETTLEMENT, feeSettled('charged'), {
+      actor: `user:${ALICE}`,
+      occurredAt: at,
+    }),
+  )
+  const partial = tradeMail(
+    registeredEvent('trade.fee.settled', SETTLEMENT, feeSettled('partial'), {
+      actor: `user:${ALICE}`,
+      occurredAt: at,
+    }),
+  )
+
+  assert.equal(full.templateId, 'trading.fee_charged')
+  assert.equal(partial.templateId, 'trading.fee_charged_partial')
+  assert.notEqual(partial.templateId, full.templateId, 'one status, one sentence for both outcomes')
+  assert.notEqual(partial.text, full.text, 'the mail says the same thing whether or not it was paid')
+
+  // The two sentences, checked for the thing each has to say rather than for being different
+  // strings: the reader's question is "is this finished?", and only one of them may answer yes.
+  assert.match(partial.text, /only part of it|part of a performance fee/i, 'the partial never says it was short')
+  assert.match(partial.text, /still owed/i, 'the reader is not told there is a remainder')
+  assert.match(partial.text, /later settlement/i, 'the reader is not told when the rest is taken')
+  assert.doesNotMatch(full.text, /still owed/i, 'a fully paid fee claims the customer owes more')
+
+  // No figure on either, for the reason #199 exists: `due` and `collected` are both smallest-unit
+  // counts off a numeric(78,0), so the shortfall is computable here and is not denominable here.
+  for (const mail of [full, partial]) {
+    assert.equal(mail.userId, ALICE)
+    assert.equal(mail.priority, 'high', 'a partial fee is neither quieter nor uncloseable')
+    assert.doesNotMatch(mail.text, /1250|1,250/, 'a Shard count rendered as an amount of money')
+    assert.doesNotMatch(mail.text, /[$€£]\s?\d/, 'a currency figure notify cannot possibly know')
+    assert.equal(mail.link, 'https://app.cloudsforge.test/trade/bots')
+  }
+
+  // One settlement resolves once, so the two sentences are alternatives for DIFFERENT settlements
+  // rather than two facts about one — and the key therefore stays on the settlement rather than
+  // naming the disposition the way `settlement.outbound.failed`'s does. Pinned so that a later
+  // edit copying that rule's key shape has to argue with this comment first.
+  assert.equal(partial.dedupeKey, full.dedupeKey)
+  assert.equal(partial.dedupeKey, `trading.fee_charged:${SETTLEMENT}`)
+  assert.equal(partial.subjectUrn, `cf:trade:bot:${BOT}`)
+})
+
+test('a fee whose status is missing or unrecognised reads as CHARGED, never as a debt', () => {
+  // The asymmetry, aimed the opposite way from the transfer rule's below and for the same kind of
+  // reason. `undefined` here is yesterday's payload: every fee event emitted before micro-trade
+  // `ee5e189`, and any replay of one, carries no `status` at all — and every one of them was a real
+  // collection. Reading an unknown value as `partial` would tell all of those customers, and any
+  // customer whose fee was paid in full under a spelling this build does not know, that they are in
+  // arrears. A demand for money that is not owed, contradicted by the settlement history the same
+  // mail links to, is the expensive error; being told the fee was charged and finding the itemised
+  // remainder on the next settlement is the cheap one.
+  for (const status of [undefined, '', 'Partial', 'PARTIAL', 'partially', 'uncollectable', 'charged', 7, true]) {
+    const mail = tradeMail(
+      registeredEvent('trade.fee.settled', SETTLEMENT, feeSettled(status), { actor: `user:${ALICE}` }),
+    )
+    assert.equal(
+      mail.templateId,
+      'trading.fee_charged',
+      `status ${JSON.stringify(status)} claimed a debt on no evidence`,
+    )
+  }
+  // `uncollectable` is in that list rather than in a branch of its own, and it is the one case that
+  // is a PRODUCER fact rather than a tolerance. `settleFee` guards its emit with `collected > 0n`,
+  // so a settlement that took nothing never reaches this topic — trade says so at the emit site and
+  // files the arrears case as wanting a topic of its own. There is deliberately no third template,
+  // and the day one is written it is because a new topic exists to render it.
+  assert.equal(isTemplateId('trading.fee_uncollectable'), false, 'a sentence no producer can send')
 })
 
 test('an exchange transfer is two facts, and the direction picks the sentence AND the link', () => {

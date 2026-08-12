@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync, readdirSync } from 'node:fs'
 import { test } from 'node:test'
 import { TOPIC_NAMES, isRegisteredTopic, parseActor, type Actor } from '@cloudsforge/contracts-events'
 import { MAPPED_TOPICS, NON_NOTIFYING_TOPICS, RULES, hasRule, isKnownTopic } from './catalogue.ts'
@@ -575,4 +576,60 @@ test('the quarantine is a rule-side escape hatch, not a rule-side exemption', ()
   for (const topic of Object.keys(AWAITING_REGISTRATION)) {
     assert.equal(hasRule(topic), true, `${topic} is quarantined but this service has no rule for it`)
   }
+})
+
+/**
+ * micro-org#235, applied to the file that invites the defect. **No comment in this service's own
+ * modules cites a line number, in anybody's file or in its own.**
+ *
+ * A rule about comments, asserted, which needs a justification because most comment rules do not
+ * deserve one. This one is measured. Before this test there were seventeen `path.ts` + line
+ * citations across `catalogue.ts`, `topics.ts` and this repository's own `pipeline.ts`, and on
+ * 2026-08-11 **fifteen of them pointed at something other than what they claimed**: the number on
+ * `trade/src/bots.ts` in the `trade.bot.paused` rule landed on an `idempotencyKey` inside
+ * `startBot` rather than on the pause that leaves a position open; two landed on blank lines; the
+ * pair cited for `settlement.outbound.confirmed` landed in a function that emits neither of the two
+ * topics the sentence was about. The only two that still resolved were both into `micro-contracts`
+ * — the one sibling this repository's CI checks out, and therefore the only repository whose drift
+ * anything here could ever have noticed.
+ *
+ * That is exactly the shape #235 describes: a cross-repo citation is a claim no test can see go
+ * wrong, so it goes wrong silently and then argues for the wrong thing. The `why` on
+ * `trade.bot.paused` was using its stale number to argue a priority.
+ *
+ * A symbol cannot drift that way — it moves with the code it names and is greppable from either end
+ * — and quoting the producer's own sentence beside it makes the claim checkable by reading two
+ * files rather than by trusting an offset. Both are what the citations here now do.
+ *
+ * **The test files are excluded, and that is a real hole rather than a tidy one.** This comment has
+ * to be able to quote the offenders it exists because of, and a scan that included itself could not
+ * say what it found. The service modules are where a citation does damage, because that is where
+ * one argues for a priority, a template or a decision not to notify.
+ *
+ * Reading the source rather than inspecting comments some cleverer way follows `catalogue.test.ts`,
+ * "the sentence #221 is about is gone from the service": a property about what is WRITTEN in this
+ * repository is checked by reading what is written in this repository.
+ */
+test('no comment in this service cites a line number in any file', () => {
+  const dir = new URL('./', import.meta.url)
+  const modules = readdirSync(dir)
+    .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))
+    .sort()
+  assert.ok(modules.length > 15, 'the scan found almost no modules — it is passing vacuously')
+  const offenders: string[] = []
+  for (const name of modules) {
+    readFileSync(new URL(name, dir), 'utf8')
+      .split('\n')
+      .forEach((line, index) => {
+        // `.ts` followed by a colon and a digit. Deliberately not restricted to comment lines: a
+        // citation is no better inside a string literal, and `NON_NOTIFYING_TOPICS` is a table of
+        // string literals that carried three of them.
+        if (/\.ts:\d/.test(line)) offenders.push(`${name} line ${index + 1}`)
+      })
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    'a path-and-line citation — name the symbol and quote what it says instead (micro-org#235)',
+  )
 })

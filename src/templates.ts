@@ -524,6 +524,52 @@ export const TEMPLATES = Object.freeze({
       'A performance fee for {{botLabel}} was charged at {{at}}, for period {{period}}.\n\nThe fee is taken from the gain above the bot\'s previous high-water mark, so a bot that fell and recovered is not charged twice for the same ground. The amount and the journal entry are on the bot\'s settlement history.',
     ),
   }),
+  /**
+   * The same charge, when the balance did not cover it. micro-org#367.
+   *
+   * **TWO templates and not one with a `{{status}}` in it**, for the reason the exchange-transfer
+   * split below states and one more that is specific to money the platform is still owed. A full
+   * collection is finished business: the fee was taken and the sentence's job is to make it
+   * checkable. A partial one is unfinished — there is an amount the customer still owes, it is
+   * still going to be taken, and the reader's next question is "when, and do I have to do
+   * anything?" A single template covering both would have to hedge that away into "some or all of
+   * the fee was charged", which is the shape this catalogue keeps calling a plausible screen over
+   * nothing: it reads fine and answers neither case.
+   *
+   * **What the second paragraph asserts, read off `trade/src/fees.ts` rather than assumed.** The
+   * uncollected remainder is not written off and it is not re-derived later from anything:
+   * `settle` finishes with `updateBot(deps.sql, bot.id, { feePaid: feePaid + collected, feeOwed:
+   * due - collected })`, so the shortfall is recorded on the bot as `feeOwed` the moment the
+   * partial happens. The next pass then computes `const due = fee + feeOwed`, which is arrears
+   * plus whatever that period newly assesses — one charge, not two — and the `fee < 1n` branch
+   * above it asks the ledger for the balance before writing another settlement row, so a wallet
+   * that still cannot cover it defers rather than accumulating an uncollectable row per period.
+   * A paused bot is swept too, under `SettleScope`'s `arrears`. Hence "at a later settlement"
+   * rather than a date this service cannot know, and hence the claim that topping up is the whole
+   * of the reader's part in it.
+   *
+   * **`uncollectable` gets no template here, and that is a producer fact rather than an
+   * oversight.** `settleFee` guards its emit with `if (collected > 0n)`, so a settlement that
+   * collected nothing never reaches this topic at all — trade documents that at the emit site and
+   * files the arrears case as wanting a topic of its own. Writing the third sentence now would put
+   * a template in this file that nothing can render, which `catalogue.test.ts` fails on by design.
+   *
+   * **No figure, for the reason `trading.fee_charged` gives above, and it costs more here.** The
+   * event now carries `due` as well as `collected` and both are smallest-unit counts off a
+   * `numeric(78,0)` column, so this service could subtract them and still not know what the answer
+   * is denominated in. "You still owe 850" is a number the reader supplies their own unit for. The
+   * settlement history is where the two amounts belong, and the link goes there.
+   */
+  'trading.fee_charged_partial': Object.freeze({
+    id: 'trading.fee_charged_partial',
+    category: 'trading',
+    params: ['botLabel', 'period', 'at'],
+    path: '/trade/bots',
+    text: en(
+      'Only part of a performance fee could be charged on your trading bot',
+      'A performance fee for {{botLabel}} was settled at {{at}}, for period {{period}}, and your balance covered only part of it.\n\nThe rest is still owed. It stays recorded against the bot and is added to what is due at a later settlement, so it is deferred rather than written off, and topping up the balance is all that is needed for it to be taken. No gain is billed twice for this: the fee is charged on the gain above the bot\'s previous high-water mark, and that mark has already moved. The amount taken, the amount still outstanding and the journal entry are on the bot\'s settlement history.',
+    ),
+  }),
   /* ── the two halves of an exchange transfer. micro-org#345 ─────────────────────────────────
    *
    * TWO templates and not one with a `{{direction}}` in it. The direction is not an adjective on

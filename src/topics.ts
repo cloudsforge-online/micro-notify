@@ -301,7 +301,16 @@ export interface UnproducedNotification {
    * estate gap file in micro-org learned the same thing and requires the same field.
    */
   readonly owner: string | null
-  /** Where that was verified. A path and a line, or a statement about the absence. */
+  /**
+   * Where that was verified: a path and a **symbol**, or a statement about the absence.
+   *
+   * Never a path with a line number appended to it. That form is a claim that goes stale on the
+   * next edit ABOVE the thing it points at, takes no test with it when it does, and then reports
+   * something that is not true — micro-org#235, where thirty cross-repo assertions failed for that
+   * reason alone and one of them accused a service of skipping an `authenticate()` call it does
+   * make. A symbol survives the edit and can be grepped for from either end, which is also the
+   * property `topics.test.ts` now pins across this whole service.
+   */
   readonly evidence: string
 }
 
@@ -322,7 +331,7 @@ export const UNPRODUCED_NOTIFICATIONS: readonly UnproducedNotification[] = Objec
     blockedBy: 'no-event',
     owner: 'micro-wallet',
     evidence:
-      'wallet emits at credit time and not before: DEPOSIT_CREDITED at wallet/src/deposits.ts:657, keyed by wallet_id. The seen-but-not-yet-credited state — the one that generates the support ticket — is visible in wallet\'s own read model (deposits.ts:734) and is announced to nobody.',
+      'wallet emits at credit time and not before: `postCredit` in wallet/src/deposits.ts emits DEPOSIT_CREDITED, keyed by wallet_id, and it is the only emit on that path. The seen-but-not-yet-credited state — the one that generates the support ticket — is a `watched_at` on the assignment row that `watchAssignment` sets in the same file, with no emit beside it, so it is visible to wallet and announced to nobody.',
   }),
   /* ────────────────────────────────────────────────────────────────────────────────────────────
    * DELETED: 'withdrawal transaction failed outright', guessed at `settlement.transaction.failed`,
@@ -407,7 +416,7 @@ export const UNPRODUCED_NOTIFICATIONS: readonly UnproducedNotification[] = Objec
     blockedBy: 'no-event',
     owner: 'micro-market',
     evidence:
-      'No market.auction.* topic exists. closeAuction (market/src/orders.ts:587) settles through the ordinary sale path and emits SOLD_TOPIC (orders.ts:427) — registered, and already notified on here — so the WINNER hears it as a sale. Nothing at all announces the close to a losing bidder, which is the half AD-08 asked for.',
+      'No market.auction.* topic exists. `closeAuction` in market/src/orders.ts settles through the ordinary sale path, which emits SOLD_TOPIC — registered, and already notified on here — so the WINNER hears it as a sale. Nothing at all announces the close to a losing bidder, which is the half AD-08 asked for.',
   }),
   Object.freeze({
     requirement: 'service incident',
@@ -416,7 +425,7 @@ export const UNPRODUCED_NOTIFICATIONS: readonly UnproducedNotification[] = Objec
     blockedBy: 'other-channel',
     owner: null,
     evidence:
-      'admin-api/src/broadcasts.ts:144 — an incident reaches users as an operator broadcast, which POST /admin/broadcasts already fans out through this service (pipeline.ts:548). A rule on the topic as well would send the same incident twice. The deleted rule claimed pipeline.ts recognised its category and routed it there; it does not — pipeline.ts:233 looks up the rule and pipeline.ts:240 records `none` and stops — so the rule was a no-op guarding a path that never used it.',
+      '`publishBroadcast` in admin-api/src/broadcasts.ts — an incident reaches users as an operator broadcast, which POST /admin/broadcasts already fans out through this service (`fanOutBroadcast` in pipeline.ts). A rule on the topic as well would send the same incident twice. The deleted rule claimed pipeline.ts recognised its category and routed it there; it does not — `ingestEvent` calls `ruleFor(event.topic)`, and with no rule it increments SUPPRESSED_TOTAL with `reason: \'no_rule\'` and returns — so the rule was a no-op guarding a path that never used it.',
   }),
 ])
 
