@@ -455,8 +455,8 @@ export function formatInstant(iso: string): string {
  * straight into the copy — so `reward.granted` ("You earned {{rewardName}} in {{titleName}}.",
  * `templates.ts`) delivered "You earned 250 Shards in Emberkin." in app and by mail.
  *
- * SHARD is RETIRED: `RETIRED_ASSETS = Object.freeze(['SHARD'])`,
- * `contracts/packages/chain/src/index.ts:58`, whose own comment is that nothing may be **newly**
+ * SHARD is RETIRED: `export const RETIRED_ASSETS: readonly AssetCode[] = Object.freeze(['SHARD'])`,
+ * in `contracts/packages/chain/src/index.ts`, whose own comment is that nothing may be **newly**
  * denominated in it. Naming it to a player is the third time a retired asset has reached a user
  * surface (micro-org #15, #182, and #227, of which this is one row).
  *
@@ -548,10 +548,58 @@ function isWithdrawalFrom(payload: Record<string, unknown>): boolean {
 }
 
 /**
+ * Did a fee settlement collect the whole assessment? **Evidence only — absence reads as a full
+ * charge.**
+ *
+ * ## Why the producer's verdict, and never `due - collected` computed here
+ *
+ * The event carries both figures, so this could subtract them. It must not, and the reason is the
+ * empty-string trap this codebase keeps rediscovering: `due` and `collected` are strings off a
+ * `numeric(78,0)` column, `BigInt('')` is `0n`, and a payload that dropped `due` — every
+ * `trade.fee.settled` emitted before micro-org#367 landed, and any replay of one — would compare
+ * `collected >= 0n` and read a partial collection as a full charge, silently, on the money path.
+ * `str` treats an empty string as absent, which is the whole reason the readers in this file go
+ * through it.
+ *
+ * The second reason outlives that one. `settleFee` computes `collected >= due ? 'charged' :
+ * collected > 0n ? 'partial' : 'uncollectable'` and writes that verdict to `fee_settlements.status`
+ * in the same statement it emits from, and the settlement history the mail sends the reader to is
+ * rendered off that column. A comparison re-implemented here is a second opinion that can disagree
+ * with the row the user is looking at — the notification saying one thing and the page it links to
+ * saying another, which is worse than either being wrong on its own.
+ *
+ * ## Which direction the default points, and why that one
+ *
+ * `charged` is what an event gets when the field is missing, misspelled or a value this build does
+ * not know — the `isWithdrawalFrom` asymmetry, aimed the other way for the same reason. Reading an
+ * unknown status as `partial` would tell a customer who paid in full that they are in arrears, and
+ * every pre-#367 payload would say it: a demand for money that is not owed, sent by the platform,
+ * with a settlement history that contradicts it. The failure in the other direction is a customer
+ * who is told the fee was taken and finds the remainder on their next settlement, where it is
+ * itemised. One is a false accusation, the other is an incomplete but true account.
+ *
+ * `'partial'` exactly, byte for byte with the producer's `SettlementStatus`, rather than `flag`'s
+ * tolerance. And one spelling rather than two: `status` is a single word, so the snake/camel
+ * tolerance `str` exists for has nothing to do here — unlike this rule's `settlement_id`/
+ * `settlementId` and `bot_id`/`botId`, which really are spelled both ways by producers.
+ *
+ * ## The status this can never see
+ *
+ * `uncollectable`. `settleFee` guards the emit with `if (collected > 0n)`, deliberately and with
+ * the argument written at the emit site: a settlement that moved no money would render as a charge
+ * that did not happen. So there is no third branch here and no third template — the arrears fact
+ * wants a topic of its own, and micro-org#367 files it rather than smuggling it in under this name.
+ */
+function isPartialCollection(payload: Record<string, unknown>): boolean {
+  return str(payload, ['status'], '') === 'partial'
+}
+
+/**
  * Is this payload's asset code one the estate is winding down?
  *
- * The list rather than contracts' own `isRetiredAsset` (`contracts/packages/chain/src/index.ts:71`),
- * and the difference is the argument: that helper takes an `AssetCode`, and this string came off a
+ * The list rather than contracts' own `isRetiredAsset(asset: AssetCode)` in
+ * `contracts/packages/chain/src/index.ts`, and the difference is the argument, which its signature
+ * makes for itself: that helper takes an `AssetCode`, and this string came off a
  * payload. Narrowing it first would need a validator whose only possible verdict on an unknown
  * code is "not retired" — the right answer, reached by a longer route, with a second place for the
  * two lists to disagree. Upper-cased because a producer's spelling is not this service's to
@@ -1251,7 +1299,7 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     category: 'trading',
     priority: 'high',
     templateId: 'trading.bot_paused',
-    why: 'A bot stopping is the state its owner most needs to hear about, and pausing does not close the position — trade/src/bots.ts:610 leaves it open and marked to market from the last tick, so silence here is a user who believes they are flat.',
+    why: 'A bot stopping is the state its owner most needs to hear about, and pausing does not close the position — `pauseBot` in trade/src/bots.ts says so in its own words, "Pause is deliberately not a flatten. The position stays open by design", and leaves equity as "a mark-to-market number from whenever it last ticked". Silence here is a user who believes they are flat.',
     recipients: forUser(
       // Keyed on the BOT, not the event: a bot paused and resumed and paused again in a minute is
       // one piece of news, and `event.id` would dedupe nothing.
@@ -1305,17 +1353,50 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
    * observation about who usually acts. `activity` reads the same field for the same reason and
    * quarantines the reader to the same topics. `userIdOf`'s actor branch is the last resort it
    * describes; it is reached here because the payload — `{ settlementId, botId, period, collected,
-   * entryId }` — names nobody, and the key is the SETTLEMENT, a uuid that is not a person.
+   * due, status, entryId }` — names nobody, and the key is the SETTLEMENT, a uuid that is not a
+   * person.
    *
    * **Keyed on the settlement, not the bot and not the event.** One fee settlement is one charge;
    * a redelivery is the same charge, and next period's fee on the same bot is a different one.
+   *
+   * **The variant is a SECOND FACT, and the dedupe key deliberately does not name it.** That is
+   * where this rule parts company with the two variants above it. `settlement.outbound.failed`
+   * puts the disposition in its key because a held failure can be corrected to a refunded one and
+   * the correction must not dedupe into the thing it corrects, and `trade.transfer.settled` puts
+   * the direction in its key because a deposit and a withdrawal are two different transfers that
+   * happen to share a topic. Neither applies here: `settle` resolves a settlement row once, writes
+   * its `status` in the same statement it emits from, and never re-opens it — the uncollected
+   * remainder is billed on a NEW row, in a new period, with a settlement id of its own. So one
+   * settlement id cannot produce both sentences, the key stays `trading.fee_charged:<settlementId>`
+   * whichever is chosen, and a redelivery still collapses into the one charge it describes.
    */
   'trade.fee.settled': Object.freeze({
     category: 'trading',
     priority: 'high',
     templateId: 'trading.fee_charged',
     why: 'The platform taking money out of a balance on its own initiative, from a user who is not on the screen — settleFee runs on trade\'s settlement path rather than on a request. Nothing else in the estate reports it, so silence here is a customer who discovers a charge by noticing a smaller number.',
+    variant: Object.freeze({
+      when: (event) => isPartialCollection(event.payload),
+      // HIGH, the same as the full charge, and that is argued rather than inherited.
+      //
+      // Not `critical`. §10.3's list is enumerated by a test precisely so that it stays small, and
+      // it is about security and about money that has gone MISSING; the shortfall here is money
+      // that never left the balance. Putting this in the set a user may not silence would mean
+      // they cannot silence the one thing this topic says that is LESS alarming than a full charge.
+      //
+      // Not `normal` either, which is the reading that was easy to reach for — less money moved,
+      // so it matters less. It carries strictly more news than the full charge: the same
+      // unannounced deduction, plus a balance that could not cover it, plus an amount the platform
+      // is still going to take. `normal` is digestible by default, so the only message in the
+      // estate that tells a customer they owe something would arrive in a batch the next day.
+      priority: 'high',
+      templateId: 'trading.fee_charged_partial',
+      why: 'A fee that was paid in full is finished business and a fee that was partly paid is not: trade carries the shortfall on the bot as feeOwed and adds it to the next settlement\'s due, so "a performance fee was charged" tells the reader the opposite of what happened to them. The same priority as the full charge, deliberately — it is that same unannounced deduction PLUS a debt, so it cannot be the quieter of the two, and it is neither a security event nor money gone missing, so it must not join the critical set §10.3 keeps small.',
+    } satisfies Variant),
     recipients: forUser(
+      // The template id in this key is a constant and not `outcomeOf`'s answer, unlike the
+      // transfer rule below. See the block comment: one settlement resolves once, so the two
+      // sentences are alternatives for different settlements rather than two facts about one.
       (event) => `trading.fee_charged:${str(event.payload, ['settlement_id', 'settlementId'], event.key)}`,
       (event) => ({
         botLabel: str(event.payload, ['bot_name', 'botName', 'name', 'bot_id', 'botId'], 'your trading bot'),
@@ -2073,11 +2154,11 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
   // (micro-org #211). The other two — wallet.link.verified and wallet.link.revoked — have RULES
   // above, because nothing else in the estate tells a user their money gained a destination.
   'wallet.deposit_address.assigned':
-    'The user is looking at it. An assignment happens because they asked for a deposit address, and the address is in the response they are reading; a rotation replaces one they are not using. The envelope is also keyed `chain:network:address` and actored `service:wallet` (wallet/src/deposits.ts:353, :365), so this is the platform talking to itself about where funds land. A mail restating an address the reader already has on screen is how a user learns to ignore mail from us.',
+    'The user is looking at it. An assignment happens because they asked for a deposit address, and the address is in the response they are reading; a rotation replaces one they are not using. The envelope is also keyed `chain:network:address` and actored `service:wallet` — `assignDepositAddress` in wallet/src/deposits.ts marks the previous assignment `rotated`, inserts the new one and emits `DEPOSIT_ADDRESS_ASSIGNED` from inside one `withOutbox`, so the rotation and the assignment are one act by the service — so this is the platform talking to itself about where funds land. A mail restating an address the reader already has on screen is how a user learns to ignore mail from us.',
   'wallet.withdrawal.refunded':
     'Already sent, by the service that knows WHY. settlement.outbound.failed carries `refundable` and its rule renders withdrawal.failed_refunded — "the amount is coming back" — from the same withdrawal id. wallet emits this when the reservation actually returns to the balance, which is the same withdrawal reaching the same user seconds later. A rule here is a second mail about one refund, and the dedupe key cannot save it because the two rules would have to agree on a key across two producers by accident. If the landing moment is judged worth its own message it belongs as a VARIANT of the settlement rule, not as a rule here.',
   'wallet.withdrawal.stuck':
-    'Already sent, by settlement.withdrawal.stuck, whose rule is above and now renders withdrawal.stuck (or withdrawal.stuck_sent) off the same withdrawal id. Two services detect one stuck withdrawal from either end — wallet because settlement has said nothing before the deadline (wallet/src/withdrawals.ts:684), settlement because its own outbound has not confirmed — and one stuck withdrawal is one fact to the person waiting for the money. This entry used to record that the settlement rule rendered "Nothing has left your balance", which was false for a withdrawal whose funds are still RESERVED; that defect is fixed at the rule rather than by adding a second mail here, and both stuck templates now say the amount is held and refuse to invite a retry.',
+    'Already sent, by settlement.withdrawal.stuck, whose rule is above and now renders withdrawal.stuck (or withdrawal.stuck_sent) off the same withdrawal id. Two services detect one stuck withdrawal from either end — wallet because settlement has said nothing before the deadline (`sweepStuck` in wallet/src/withdrawals.ts, whose own comment is that the deadline "is how long settlement is allowed to take before \'in progress\' stops being a plausible explanation"), settlement because its own outbound has not confirmed — and one stuck withdrawal is one fact to the person waiting for the money. This entry used to record that the settlement rule rendered "Nothing has left your balance", which was false for a withdrawal whose funds are still RESERVED; that defect is fixed at the rule rather than by adding a second mail here, and both stuck templates now say the amount is held and refuse to invite a retry.',
   // ── aetherholm, the first game in the registry ─────────────────────────────────────────────
   // Phase 2 changed the answer for two topics: battle.resolved and spire.captured now have
   // RULES above — the first game events worth an interruption. The phase-1 five below keep
@@ -2116,7 +2197,7 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
   // the payload (withdrawals.ts) and the recipient — the only thing that was missing — resolves.
   // The two that remain are settlement talking to wallet or to reconciliation, not to a person.
   'settlement.outbound.confirmed':
-    "wallet's own narrow name for the same movement settlement.withdrawal.completed announces (settlement/src/withdrawals.ts:437 and :449 emit both from one function). It exists to release the reservation at wallet/src/server.ts:846 and carries a withdrawal id, a hash and a timestamp. A rule here as well would tell one user their withdrawal arrived twice. Note that this is NOT the shape of the failure twin, which had no user-facing counterpart at all and is now mapped: a second rule here would duplicate a notification, whereas the failure had none.",
+    "wallet's own narrow name for the same movement settlement.withdrawal.completed announces: `confirmedEvents` in settlement/src/withdrawals.ts returns both from one call, and says so — 'Two topics for one fact … `settlement.outbound.confirmed` is wallet's name and is deliberately narrow — everything wallet needs to settle a reservation and nothing else'. It exists to release that reservation — wallet consumes it as `SETTLEMENT_CONFIRMED` in wallet/src/settlement.ts — and carries a withdrawal id, a hash and a timestamp. A rule here as well would tell one user their withdrawal arrived twice. Note that this is NOT the shape of the failure twin, which had no user-facing counterpart at all and is now mapped: a second rule here would duplicate a notification, whereas the failure had none.",
   // ── tessera ────────────────────────────────────────────────────────────────────────────────
   // TWO of the seven, and both are decisions: the fact reaches nobody because there is nobody it
   // is news to. There used to be four.
