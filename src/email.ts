@@ -29,6 +29,7 @@
 
 import type { SmtpConfig } from './env.ts'
 import { failure, type ChannelAdapter, type OutboundMessage, type SendOutcome } from './channels.ts'
+import { renderEmailHtml } from './emailhtml.ts'
 import { isUndeliverableAddress } from './reserved.ts'
 
 /** The slice of nodemailer this adapter uses. Narrow, so the lazy import stays typed. */
@@ -38,6 +39,12 @@ interface Transport {
     to: string
     subject: string
     text: string
+    /**
+     * Optional, and nodemailer builds `multipart/alternative` when both are present. Optional
+     * rather than required so the existing tests, which assert on `text`, keep compiling — and so
+     * a future caller that deliberately wants text only can still express it.
+     */
+    html?: string
     replyTo?: string
     headers?: Record<string, string>
   }): Promise<{ messageId?: string }>
@@ -108,9 +115,22 @@ export function emailAdapter(options: EmailOptions): ChannelAdapter {
           from: smtp.from ?? 'CloudsForge <no-reply@invalid>',
           to: message.address,
           subject: message.subject,
-          // Plain text only. An HTML body is an injection surface for every template parameter,
-          // and every parameter here is domain data from an event this service did not write.
+          // The text part is unchanged, and stays FIRST for a reason beyond ordering: it is the
+          // part that must remain correct on its own. A client that refuses HTML, a screen reader
+          // set to prefer plain text, and `deliveries` replay all read this and only this.
           text: `${message.body}\n\n${message.link}\n`,
+          // ── THE REFUSAL ABOVE THIS LINE USED TO SAY "PLAIN TEXT ONLY" ───────────────────────
+          // and its reason — that every template parameter is domain data this service did not
+          // write — was right. It is satisfied rather than overruled: `renderEmailHtml` is handed
+          // the SAME already-rendered text, escapes it whole, and never reads a parameter. A
+          // parameter carrying markup arrives as text and leaves as entities. See the header of
+          // `emailhtml.ts` for the two guards that hold that up.
+          html: renderEmailHtml({
+            subject: message.subject,
+            body: message.body,
+            link: message.link,
+            category: message.category,
+          }),
           ...(smtp.replyTo ? { replyTo: smtp.replyTo } : {}),
           headers: {
             // Lets a receiving server collapse a retried delivery instead of showing it twice.
