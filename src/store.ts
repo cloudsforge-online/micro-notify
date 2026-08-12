@@ -558,6 +558,43 @@ export async function claimDeliveries(
   }))
 }
 
+/**
+ * Send an existing notification again, as a NEW delivery.
+ *
+ * ## Why a new row rather than resetting the old one
+ *
+ * Resetting `state` to `pending` and zeroing `attempts` is one statement and is what "resend"
+ * sounds like. It is wrong: `last_error`, `reason` and `attempts` on that row are the estate's
+ * only durable record of why the message did not arrive, and an operator pressing resend is
+ * precisely somebody who will want to know that afterwards — "did it fail the same way twice" is
+ * the question that separates a transient bounce from an address that will never work.
+ *
+ * So the original is left exactly as it is and a second delivery is queued beside it. The history
+ * reads as what actually happened: one attempt that failed, one that an operator asked for.
+ *
+ * ## What it refuses
+ *
+ * A delivery already `pending` is refused rather than duplicated. It is queued; asking again
+ * produces two messages to the same person for one event, and the operator who clicked twice
+ * because the first click seemed to do nothing is the likeliest caller of this route.
+ *
+ * Returns the new delivery's id, or `null` when there is nothing to resend — no such delivery, or
+ * one whose target has since been deleted (`target_id` is `on delete set null`, and a delivery
+ * with no address cannot be sent to anybody).
+ */
+export async function resendDelivery(sql: Db, id: string): Promise<string | null> {
+  const rows = await sql<Array<{ id: string }>>`
+    insert into deliveries (notification_id, user_id, channel, target_id, max_attempts)
+    select d.notification_id, d.user_id, d.channel, d.target_id, d.max_attempts
+      from deliveries d
+     where d.id = ${id}::uuid
+       and d.state <> 'pending'
+       and d.target_id is not null
+    returning id
+  `
+  return rows[0]?.id ?? null
+}
+
 export async function markDeliverySent(
   sql: Db,
   id: string,
@@ -687,12 +724,32 @@ export interface DeliveryHistoryRow {
  *
  * Defaults to the terminal states, because that is the question an operator is asking. `state`
  * widens it when the question is "is anything stuck".
+ *
+ * ## `userId` and `address`, and why the address is not on the row
+ *
+ * The original question this served was "what is broken across the estate". The question support
+ * actually gets is **"what did we send THIS person, and did it arrive"** — a different query, and
+ * one that could not be asked at all: there was no way to filter by recipient, and the default of
+ * `dead, undeliverable` hid every message that worked, which is most of the answer.
+ *
+ * `userId` filters. `address` filters too, and joins `channel_targets` to do it, because a person
+ * contacting support quotes the address they did not receive mail at — not their user id, which
+ * they have never seen.
+ *
+ * The address is deliberately **not** added to `DeliveryHistoryRow`. This row already travels to
+ * an operator console, and an email address is personal data that the dead-letter view has never
+ * carried; adding it would widen what every existing caller shows, silently. The filter reads
+ * `channel_targets` without the value coming back.
  */
 export async function listDeliveries(
   sql: Db,
   options: {
     readonly states: readonly DeliveryState[]
     readonly channel: Channel | null
+    /** One user's mail. Null is every user. */
+    readonly userId: string | null
+    /** Exact match, case-folded. Null is every address. */
+    readonly address: string | null
     readonly limit: number
     readonly cursor: string | null
   },
@@ -725,6 +782,17 @@ export async function listDeliveries(
       join notifications n on n.id = d.notification_id
      where d.state = any(${options.states as string[]})
        and (${options.channel === null} or d.channel = ${options.channel ?? ''})
+       and (${options.userId === null} or d.user_id = ${options.userId ?? '00000000-0000-0000-0000-000000000000'}::uuid)
+       -- exists, not a join: a user can hold more than one target per channel, and joining
+       -- would return the delivery once per matching target. Case-folded because an address is
+       -- case-insensitive in its domain and everybody types their own inconsistently.
+       and (
+         ${options.address === null}
+         or exists (
+           select 1 from channel_targets t
+            where t.id = d.target_id and lower(t.address) = lower(${options.address ?? ''})
+         )
+       )
        and (
          ${cursor === null}
          or (d.created_at, d.id) < (${cursor?.createdAt ?? new Date()}, ${cursor?.id ?? '00000000-0000-0000-0000-000000000000'}::uuid)
@@ -1153,9 +1221,13 @@ export interface NotifyStore {
   listDeliveries(options: {
     readonly states: readonly DeliveryState[]
     readonly channel: Channel | null
+    readonly userId: string | null
+    readonly address: string | null
     readonly limit: number
     readonly cursor: string | null
   }): Promise<{ readonly deliveries: readonly DeliveryHistoryRow[]; readonly nextCursor: string | null }>
+  /** Queue the same notification again as a new delivery. Null when there is nothing to resend. */
+  resendDelivery(id: string): Promise<string | null>
 }
 
 export function postgresNotifyStore(sql: Db): NotifyStore {
@@ -1166,5 +1238,6 @@ export function postgresNotifyStore(sql: Db): NotifyStore {
     upsertPreferences: (userId, preferences) => upsertPreferences(sql, userId, preferences),
     insertBroadcast: (input) => insertBroadcast(sql, input),
     listDeliveries: (options) => listDeliveries(sql, options),
+    resendDelivery: (id) => resendDelivery(sql, id),
   }
 }

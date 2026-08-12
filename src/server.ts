@@ -573,11 +573,27 @@ function buildRoutes(): Route[] {
         requireAdmin(principal)
 
         const requestedStates = ctx.url.searchParams.getAll('state')
+        const user = ctx.url.searchParams.get('user')
+        const address = ctx.url.searchParams.get('address')
+
+        // ── THE DEFAULT DEPENDS ON THE QUESTION BEING ASKED ────────────────────────────────
+        // Unfiltered, this is the dead-letter view and `dead, undeliverable` is right: an
+        // operator asking "what is broken" does not want the healthy majority.
+        //
+        // Asked about ONE recipient it is a different question — "what did we send this person,
+        // and did it arrive" — and the same default answers it wrongly in the worst way. Support
+        // looks up a user who says they got nothing, sees an empty list, and concludes nothing
+        // was sent, when in truth every message is sitting there in `sent`. An empty result that
+        // means "no failures" is indistinguishable from one that means "no mail", and only one
+        // of those is a reason to resend.
+        const scoped = user !== null || address !== null
         const states: DeliveryState[] = requestedStates.length
           ? requestedStates.filter((state): state is DeliveryState =>
               (DELIVERY_STATES as readonly string[]).includes(state),
             )
-          : ['dead', 'undeliverable']
+          : scoped
+            ? [...DELIVERY_STATES]
+            : ['dead', 'undeliverable']
         if (states.length === 0) throw new BadRequestError('state must be one of ' + DELIVERY_STATES.join(', '))
 
         const channelParam = ctx.url.searchParams.get('channel')
@@ -586,13 +602,63 @@ function buildRoutes(): Route[] {
         }
         const channel: Channel | null = channelParam
 
+        // Rejected rather than coerced. A `user` that is not a uuid would otherwise reach the
+        // query as a cast that throws 500 deep in the driver, and the operator would read an
+        // outage where they made a typo.
+        if (user !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(user)) {
+          throw new BadRequestError('user must be a uuid')
+        }
+
         const page = await deps.store.listDeliveries({
           states,
           channel,
+          userId: user,
+          address,
           limit: pageSize(ctx),
           cursor: ctx.url.searchParams.get('cursor'),
         })
         return { status: 200, body: page }
+      },
+    },
+    {
+      method: 'POST',
+      path: '/admin/deliveries/:id/resend',
+      /**
+       * Send it again, as a new delivery beside the original.
+       *
+       * `202`, not `200`: nothing has been sent when this returns. The new row is `pending` and
+       * the dispatcher picks it up on its own schedule, so a `200` would claim a delivery that
+       * has not happened — the same lie `sent` would be if it were written here.
+       *
+       * `409` when there is nothing to resend, and the message says which of the two reasons it
+       * is. Merging them into a 404 would tell an operator "no such delivery" about one that is
+       * on screen in front of them.
+       */
+      handle: async (ctx, deps) => {
+        const principal = await authenticate(ctx, deps)
+        requireAdmin(principal)
+
+        const id = ctx.param ?? ''
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+          throw new BadRequestError('delivery id must be a uuid')
+        }
+
+        const created = await deps.store.resendDelivery(id)
+        if (created === null) {
+          return {
+            status: 409,
+            body: {
+              error: {
+                code: 'not_resendable',
+                message:
+                  'no delivery with that id that can be resent — it is already pending, or the ' +
+                  'address it was addressed to has since been removed',
+              },
+            },
+          }
+        }
+        deps.logger.info('delivery resent by an operator', { deliveryId: id, createdDeliveryId: created })
+        return { status: 202, body: { deliveryId: created } }
       },
     },
   ]
