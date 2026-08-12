@@ -42,6 +42,7 @@ import {
   deliveryStats,
   insertBroadcast,
   listDeliveries,
+  resendDelivery,
   listNotifications,
   upsertPreferences,
   upsertTarget,
@@ -277,6 +278,85 @@ describe('pipeline', { skip }, () => {
     assert.equal((await dispatchDue(rig.deps, 50)).claimed, 0)
   })
 
+  test('support can ask what one person was sent, including the mail that worked', async () => {
+    // The question this whole filter exists for. Unfiltered, the dead-letter view answers "what
+    // is broken"; scoped to a person it must answer "what did we send them", and a `sent` row is
+    // most of that answer. Before this, `sent` was invisible and an operator reading an empty
+    // list concluded nothing had been sent.
+    const rig = testRig(sql, { backoffMs: 0, maxAttempts: 3 })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
+    await ingestEvent(
+      rig.deps,
+      registeredEvent('custody.key.exported', ALICE, { user_id: ALICE, key_id: 'key-1' }),
+    )
+    await dispatchDue(rig.deps, 50)
+
+    const dead = await listDeliveries(sql, {
+      states: ['dead', 'undeliverable'],
+      channel: null, userId: null, address: null, limit: 20, cursor: null,
+    })
+    assert.equal(dead.deliveries.length, 0, 'nothing failed, so the dead-letter view is empty')
+
+    // Same estate, same instant, scoped to the person: the successful mail is there.
+    const mine = await listDeliveries(sql, {
+      states: ['pending', 'sent', 'dead', 'undeliverable'],
+      channel: 'email', userId: ALICE, address: null, limit: 20, cursor: null,
+    })
+    assert.equal(mine.deliveries.length, 1)
+    assert.equal(mine.deliveries[0]?.userId, ALICE)
+
+    // And by the address, which is what a person quotes to support — they have never seen a uuid.
+    const byAddress = await listDeliveries(sql, {
+      states: ['pending', 'sent', 'dead', 'undeliverable'],
+      channel: null, userId: null, address: 'ALICE@cloudsforge.online', limit: 20, cursor: null,
+    })
+    assert.equal(byAddress.deliveries.length, 1, 'the match is case-folded')
+
+    const other = await listDeliveries(sql, {
+      states: ['pending', 'sent', 'dead', 'undeliverable'],
+      channel: null, userId: null, address: 'nobody@cloudsforge.online', limit: 20, cursor: null,
+    })
+    assert.equal(other.deliveries.length, 0)
+  })
+
+  test('a resend queues a NEW delivery and leaves the failure it is repeating intact', async () => {
+    const rig = testRig(sql, { backoffMs: 0, maxAttempts: 2 })
+    rig.adapters.email.failAlways({
+      ok: false, reason: 'upstream_error', retryable: true, detail: 'the relay is refusing connections',
+    })
+    await upsertTarget(sql, { userId: ALICE, channel: 'email', address: 'alice@cloudsforge.online' })
+    await ingestEvent(
+      rig.deps,
+      registeredEvent('custody.key.exported', ALICE, { user_id: ALICE, key_id: 'key-1' }),
+    )
+    for (let pass = 0; pass < 4; pass += 1) await dispatchDue(rig.deps, 50)
+
+    const before = await listDeliveries(sql, {
+      states: ['dead', 'undeliverable'], channel: 'email', userId: null, address: null, limit: 20, cursor: null,
+    })
+    assert.equal(before.deliveries.length, 1)
+    const original = before.deliveries[0]!
+
+    const created = await resendDelivery(sql, original.id)
+    assert.ok(created, 'a dead delivery can be resent')
+    assert.notEqual(created, original.id, 'a NEW row, not the old one reset')
+
+    // The whole point: why it failed is still readable afterwards. "Did it fail the same way
+    // twice" is the question that separates a transient bounce from a dead address, and
+    // resetting the original in place would have destroyed the evidence for it.
+    const after = await sql<Array<{ id: string; state: string; attempts: number; last_error: string | null }>>`
+      select id, state, attempts, last_error from deliveries where id = ${original.id}
+    `
+    assert.equal(after[0]?.state, 'dead')
+    assert.equal(after[0]?.attempts, 2)
+    assert.match(after[0]?.last_error ?? '', /refusing connections/)
+
+    // Refused rather than duplicated: the new one is pending, and an operator clicking twice
+    // because the first click looked like nothing happened must not send two messages.
+    assert.equal(await resendDelivery(sql, created), null)
+    assert.equal(await resendDelivery(sql, '00000000-0000-4000-8000-000000000000'), null)
+  })
+
   test('a failing channel eventually dead-letters, and the row is retained', async () => {
     const rig = testRig(sql, { backoffMs: 0, maxAttempts: 3 })
     rig.adapters.email.failAlways({
@@ -306,7 +386,7 @@ describe('pipeline', { skip }, () => {
     assert.match(rows[0]?.last_error ?? '', /refusing connections/)
 
     // And it appears in the one dead-letter view, alongside every other channel.
-    const page = await listDeliveries(sql, { states: ['dead', 'undeliverable'], channel: null, limit: 20, cursor: null })
+    const page = await listDeliveries(sql, { states: ['dead', 'undeliverable'], channel: null, userId: null, address: null, limit: 20, cursor: null })
     assert.equal(page.deliveries.length, 1)
     assert.equal(page.deliveries[0]?.outcome, 'dead_upstream_error')
 
@@ -406,7 +486,7 @@ describe('pipeline', { skip }, () => {
     assert.equal((await deliveryStats(sql)).awaitingAllowance, 1)
 
     // Nothing terminal exists to find, because nothing was given up on.
-    const page = await listDeliveries(sql, { states: ['dead', 'undeliverable'], channel: null, limit: 20, cursor: null })
+    const page = await listDeliveries(sql, { states: ['dead', 'undeliverable'], channel: null, userId: null, address: null, limit: 20, cursor: null })
     assert.equal(page.deliveries.length, 0)
 
     // The allowance resets. The mail that was waiting for it goes out — the assertion that makes
@@ -571,6 +651,8 @@ describe('pipeline', { skip }, () => {
     const page = await listDeliveries(sql, {
       states: ['dead', 'undeliverable'],
       channel: 'webhook',
+      userId: null,
+      address: null,
       limit: 10,
       cursor: null,
     })

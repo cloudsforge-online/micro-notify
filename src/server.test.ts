@@ -111,6 +111,11 @@ function fakeStore(calls: Harness['calls']): NotifyStore {
         recipients: null,
       }
     },
+    async resendDelivery(id: string) {
+      return id === '77777777-7777-4777-8777-777777777777'
+        ? '88888888-8888-4888-8888-888888888888'
+        : null
+    },
     async listDeliveries(options) {
       return {
         deliveries: [
