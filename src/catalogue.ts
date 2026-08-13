@@ -833,10 +833,28 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     priority: 'normal',
     templateId: 'account.registered',
     why: 'The first thing the platform ever says to someone.',
-    // No `learns`, and that is a statement about the producer rather than a decision here.
-    // identity's registration payload is `{ userId, handle, organisationId, organisationSlug }`
-    // (identity/src/users.ts) and carries **no address at all**, so there is nothing on this
-    // event for this service to keep. The address arrives on the verification event below.
+    // ── THIS COMMENT USED TO EXPLAIN WHY THERE WAS NO `learns`. IT WAS THE BUG (micro-org#447) ──
+    //
+    // What stood here: "No `learns`, and that is a statement about the producer rather than a
+    // decision here. identity's registration payload is `{ userId, handle, organisationId,
+    // organisationSlug }` and carries **no address at all**, so there is nothing on this event
+    // for this service to keep. The address arrives on the verification event below."
+    //
+    // Every sentence of that was true, and the conclusion drawn from it was wrong. "The address
+    // arrives on the verification event" describes a LATER event; this rule fans out when THIS
+    // one is ingested, against the targets held at that moment. There were none. So the welcome
+    // mail — "the first thing the platform ever says to someone" — was routed to in-app only and
+    // has never been emailed to anybody in the life of this estate. Not delayed: never sent.
+    //
+    // identity now puts the normalised address on the registration payload, so this learns it.
+    // `learnAddress` runs before `createNotification` in the same transaction (pipeline.ts), so
+    // the target exists when this notification routes, and no ordering is left to chance.
+    learns: {
+      channel: 'email' as const,
+      read: (event: InboundEvent) => emailOf(event.payload),
+      subject: (event: InboundEvent) => str(event.payload, ['user_id', 'userId'], '') || null,
+      why: 'The account was just created, so this is the first moment the address exists anywhere and the first moment a target can be written for it. Same mirror, and the same one-active-row rule, as the verification rule below — see its `why` for what the mirror is for and where it goes stale.',
+    },
     recipients: forUser(
       (event) => `account.registered:${event.key}`,
       (event) => ({ handle: str(event.payload, ['handle'], 'there') }),

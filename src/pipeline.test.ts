@@ -36,6 +36,7 @@ import type postgres from 'postgres'
 import { SIGNATURE_HEADER, verifyDelivery } from '@cloudsforge/contracts-events'
 import { CATEGORIES, CHANNELS } from './model.ts'
 import { emailAdapter } from './email.ts'
+import { renderEmailHtml } from './emailhtml.ts'
 import { webhookAdapter } from './webhook.ts'
 import { dispatchDue, fanOutBroadcast, flushDueDigests, ingestEvent } from './pipeline.ts'
 import {
@@ -276,6 +277,62 @@ describe('pipeline', { skip }, () => {
 
     // And it is not claimable until then.
     assert.equal((await dispatchDue(rig.deps, 50)).claimed, 0)
+  })
+
+  test('the welcome mail is actually emailed, to the address registration carried (micro-org#447)', async () => {
+    // THE END-TO-END PROOF. `catalogue.test.ts` pins the fields; this pins the outcome, because
+    // the defect was invisible at every layer except this one: the notification was created, the
+    // in-app copy delivered, and the estate looked healthy while the first thing the platform
+    // ever says to someone reached nobody by mail. Not once, for the life of the service.
+    //
+    // No `upsertTarget` before ingest, deliberately. If this test seeded the address it would
+    // prove only that mail works when a target already exists, which was never in doubt — the
+    // whole defect was that at registration one does NOT exist, and the event has to carry it.
+    const rig = testRig(sql, { backoffMs: 0 })
+    await ingestEvent(
+      rig.deps,
+      registeredEvent('identity.user.registered', ALICE, {
+        userId: ALICE,
+        handle: 'sam',
+        email: 'sam@cloudsforge.online',
+        organisationId: '00000000-0000-4000-8000-0000000000aa',
+        organisationSlug: 'sam',
+      }),
+    )
+
+    const rows = await sql<Array<{ channel: string }>>`
+      select channel from deliveries where user_id = ${ALICE} and channel = 'email'
+    `
+    assert.equal(rows.length, 1, 'registration produced no email delivery at all — the whole defect')
+
+    await dispatchDue(rig.deps, 50)
+    assert.equal(rig.adapters.email.sent.length, 1, 'the welcome mail was not sent')
+    assert.equal(
+      rig.adapters.email.sent[0]?.message.address,
+      'sam@cloudsforge.online',
+      'sent, but not to the address the registration carried',
+    )
+
+    // ── AND IT IS THE BRANDED MAIL, NOT A BARE ONE ────────────────────────────────────────────
+    //
+    // The HTML shell is applied by the adapter to EVERY email (`email.ts` hands every message to
+    // `renderEmailHtml`), so the welcome mail gets the same body as the verification mail by
+    // construction rather than by a per-template opt-in. Asserted here anyway: "by construction"
+    // is exactly what was believed about the address this test exists to prove, and the welcome
+    // mail is the first thing a new account ever sees.
+    const message = rig.adapters.email.sent[0]?.message
+    assert.ok(message, 'nothing was handed to the transport')
+    if (!message) return
+    const html = renderEmailHtml({
+      subject: message.subject,
+      body: message.body,
+      link: message.link,
+      category: message.category,
+    })
+    assert.match(html, /<table/, 'not the table-based branded shell')
+    assert.match(html, /#f4f0e8/i, 'the brand paper colour is missing')
+    assert.ok(html.includes(message.link ?? ''), 'the action link is not in the HTML body')
+    assert.equal(message.category, 'account')
   })
 
   test('support can ask what one person was sent, including the mail that worked', async () => {

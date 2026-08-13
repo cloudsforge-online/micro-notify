@@ -348,13 +348,18 @@ test('a dedupe key never contains the event id for a fact that two events can de
  * perfectly well-formed notification, addressed to nobody, exactly as the last year of this service
  * did. Every field below is one identity is to emit: `userId`, `handle`, `email`, `verifyUrl`.
  *
- * The negative half is `identity.user.registered`, and it is not padding. Its payload is
- * `{ userId, handle, organisationId, organisationSlug }` (identity/src/users.ts) and carries
- * **no address at all**, which is why the registration mail could never have gone out however well
- * the SMTP was configured. A `learns` on that rule would read `undefined` and store nothing while
- * reporting the gap closed.
+ * The second half was, until micro-org#447, the OPPOSITE assertion about
+ * `identity.user.registered`: that its payload carried no address, so a `learns` there would read
+ * `undefined` and store nothing while reporting the gap closed. That was true of the payload as it
+ * stood, and it is why this test existed — but it pinned the defect in place rather than the
+ * invariant. The registration mail could never have gone out however well SMTP was configured,
+ * and this test agreed that it should not.
+ *
+ * identity now emits the normalised address on that payload, so the assertion is inverted: the
+ * registration rule MUST learn it, and must read the same fields, or the first thing the platform
+ * ever says to someone goes nowhere again.
  */
-test('the verification rule reads the fields identity emits, and registration carries no address', () => {
+test('both identity rules read the fields identity emits, registration included', () => {
   const rule = RULES['identity.email.verification_requested']
   assert.ok(rule, 'the only event in the estate that carries an email address has no rule')
   if (!rule) return
@@ -390,8 +395,20 @@ test('the verification rule reads the fields identity emits, and registration ca
   // two facts; collapsing them would leave a reader who asked for a second one with nothing.
   assert.equal(set.recipients[0].dedupeKey, `account.verify_email:${event.id}`)
 
-  // And the registration event, which is where everybody assumed the address was.
-  assert.equal(RULES['identity.user.registered']?.learns, undefined)
+  // And the registration event, which is where everybody assumed the address was — and where it
+  // now actually is (micro-org#447).
+  const reg = RULES['identity.user.registered']
+  assert.ok(reg?.learns, 'the welcome mail cannot be addressed without this')
+  const registered = registeredEvent('identity.user.registered', ALICE, {
+    userId: ALICE,
+    handle: 'alice',
+    email: 'alice@example.test',
+    organisationId: '00000000-0000-4000-8000-0000000000aa',
+    organisationSlug: 'alice',
+  })
+  assert.equal(reg?.learns?.channel, 'email')
+  assert.equal(reg?.learns?.read(registered), 'alice@example.test')
+  assert.equal(reg?.learns?.subject(registered), ALICE)
 })
 
 test('a link this service would not put in a mail becomes the page that can issue a new one', () => {
