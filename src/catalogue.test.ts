@@ -2084,3 +2084,149 @@ test(
     assert.equal(set.recipients[0]?.params['handle'], values['handle'], 'the greeting lost its name')
   },
 )
+
+/* ------------------------------------------------------------------ agora
+ *
+ * The square's one rule reads `payload.subject` and never the envelope actor, which means the
+ * generic "every rule supplies every parameter" test above SKIPS it: that test runs each rule
+ * against an empty payload, this rule answers `no_recipient` to one, and a skipped rule is a rule
+ * nobody checks. So the parameter coverage is asserted here against the payload agora really
+ * sends, for both outcomes, and the actor is set to somebody ELSE on purpose.
+ */
+
+const AGORA_PAYLOAD = {
+  notificationId: 'notif-1',
+  subject: `user:${ALICE}`,
+  kind: 'reply',
+  actorHandle: 'bob',
+  postId: 'post-9',
+  detail: '',
+  url: 'https://agora.cloudsforge.online/p/post-9',
+}
+
+test('an agora mail request is addressed from the payload subject, never the envelope actor', () => {
+  const rule = RULES['agora.notification.mail_requested']
+  assert.ok(rule, 'the square has no rule')
+  if (!rule) return
+
+  // The actor is BOB and the subject is ALICE. agora emits `actor: row.subject` today, so this
+  // would pass either way — which is exactly why it is pinned: the sweep is a SCHEDULED job, and
+  // the day it emits under `service:agora` a rule reading the actor would silently address nobody,
+  // while a rule reading the actor's user id would address whoever triggered the sweep.
+  const event = registeredEvent('agora.notification.mail_requested', 'notif-1', AGORA_PAYLOAD, {
+    actor: `user:${BOB}`,
+  })
+  const set = rule.recipients(event)
+  assert.equal(set.kind, 'recipients')
+  if (set.kind !== 'recipients') return
+  assert.equal(set.recipients.length, 1, 'one notification is one reader')
+  assert.equal(set.recipients[0]?.userId, ALICE)
+  assert.equal(set.recipients[0]?.params['headline'], '@bob replied to you')
+  assert.equal(set.recipients[0]?.params['url'], AGORA_PAYLOAD.url)
+  // Keyed on the notification row rather than the event: the sweep is bounded by a time window, so
+  // two overlapping sweeps can offer one still-unread notification twice.
+  assert.equal(set.recipients[0]?.dedupeKey, 'agora.notification:notif-1')
+})
+
+test('every outcome of the agora rule renders with the payload agora really sends', () => {
+  const rule = RULES['agora.notification.mail_requested']
+  assert.ok(rule, 'the square has no rule')
+  if (!rule) return
+
+  for (const kind of ['reply', 'moderation', 'a_kind_invented_after_this_test'] as const) {
+    const event = registeredEvent(
+      'agora.notification.mail_requested',
+      'notif-1',
+      { ...AGORA_PAYLOAD, kind, actorHandle: kind === 'moderation' ? '' : 'bob' },
+      { actor: `user:${ALICE}` },
+    )
+    const set = rule.recipients(event)
+    assert.equal(set.kind, 'recipients', kind)
+    if (set.kind !== 'recipients') continue
+    const outcome = outcomeOf(rule, event)
+    const template = templateFor(outcome.templateId)
+    const rendered = renderTemplate(
+      template,
+      set.recipients[0]?.params ?? {},
+      DEFAULT_LOCALE,
+      'https://hub.example',
+    )
+    assert.deepEqual(rendered.missing, [], `${kind} renders ${outcome.templateId} with a gap in it`)
+  }
+})
+
+test('a moderation mail request is a different template, a louder priority, and carries the reason', () => {
+  const rule = RULES['agora.notification.mail_requested']
+  assert.ok(rule, 'the square has no rule')
+  if (!rule) return
+
+  // The one kind agora ever fills `detail` in for, and the one where a person concludes the
+  // product is broken rather than that they broke a rule.
+  const event = registeredEvent(
+    'agora.notification.mail_requested',
+    'notif-2',
+    { ...AGORA_PAYLOAD, kind: 'moderation', actorHandle: '', detail: 'a post was removed after review', postId: null, url: 'https://agora.cloudsforge.online/notifications' },
+    { actor: `user:${ALICE}` },
+  )
+  const outcome = outcomeOf(rule, event)
+  assert.equal(outcome.templateId, 'agora.moderation')
+  assert.equal(outcome.priority, 'normal')
+
+  const set = rule.recipients(event)
+  assert.equal(set.kind, 'recipients')
+  if (set.kind !== 'recipients') return
+  const rendered = renderTemplate(
+    templateFor(outcome.templateId),
+    set.recipients[0]?.params ?? {},
+    DEFAULT_LOCALE,
+    'https://hub.example',
+  )
+  assert.match(rendered.body, /a post was removed after review/)
+  // The link is agora's own origin, absolute, and NOT resolved against the hub — the hub has no
+  // route into the square, so a relative path here would render a mail whose one button 404s.
+  assert.equal(rendered.link, 'https://agora.cloudsforge.online/notifications')
+})
+
+test('an agora mail request from a deployment that never learnt its own origin still links somewhere real', () => {
+  const rule = RULES['agora.notification.mail_requested']
+  assert.ok(rule, 'the square has no rule')
+  if (!rule) return
+
+  // `AGORA_PUBLIC_URL` unset means agora omits `url` entirely rather than sending `''` — see
+  // `sweepEmail` there. The fall-back is the hub's own notification centre: one hop from the right
+  // page, and a page that exists, where a guessed hostname is a 404 presented as a working link.
+  const { url: _omitted, ...withoutUrl } = AGORA_PAYLOAD
+  const event = registeredEvent('agora.notification.mail_requested', 'notif-3', withoutUrl, {
+    actor: `user:${ALICE}`,
+  })
+  const set = rule.recipients(event)
+  assert.equal(set.kind, 'recipients')
+  if (set.kind !== 'recipients') return
+  assert.equal(set.recipients[0]?.params['url'], '/notifications')
+  const rendered = renderTemplate(
+    templateFor(outcomeOf(rule, event).templateId),
+    set.recipients[0]?.params ?? {},
+    DEFAULT_LOCALE,
+    'https://hub.example',
+  )
+  assert.equal(rendered.link, 'https://hub.example/notifications')
+})
+
+test('a mail request whose subject is a service principal is not a person to interrupt', () => {
+  const rule = RULES['agora.notification.mail_requested']
+  assert.ok(rule, 'the square has no rule')
+  if (!rule) return
+
+  // `not_applicable`, not `no_recipient`: the producer said exactly who, and the answer is that
+  // they are not a person. Collapsing the two would hide a real producer defect behind a shrug.
+  const named = rule.recipients(
+    registeredEvent('agora.notification.mail_requested', 'notif-4', { ...AGORA_PAYLOAD, subject: 'service:beacon' }),
+  )
+  assert.deepEqual(named, { kind: 'none', reason: 'not_applicable' })
+
+  // A bare uuid is a producer that stopped spelling a subject, and that IS a defect to go and fix.
+  const bare = rule.recipients(
+    registeredEvent('agora.notification.mail_requested', 'notif-5', { ...AGORA_PAYLOAD, subject: ALICE }),
+  )
+  assert.deepEqual(bare, { kind: 'none', reason: 'no_recipient' })
+})

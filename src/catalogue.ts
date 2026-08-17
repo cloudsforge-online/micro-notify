@@ -2115,9 +2115,116 @@ export const RULES: Readonly<Record<string, Rule>> = Object.freeze({
     },
   }),
 
+  /* --------------------------------------------------------- agora
+   *
+   * ONE rule for fourteen registered topics, and the thirteen it does not map are in
+   * `NON_NOTIFYING_TOPICS` with the same argument written out one by one: agora keeps its own
+   * notification table, decides for itself what is worth an email, and asks for exactly those by
+   * emitting `agora.notification.mail_requested`. A rule on `agora.post.created` would mail every
+   * follower of every post ever written; a rule on `agora.spark.created` would mail an author once
+   * per like. The producer has already made this decision — including the preferences the reader
+   * set — and this service's job is to deliver what it asked for, not to re-derive it from the raw
+   * facts and get a different answer.
+   */
+
+  'agora.notification.mail_requested': Object.freeze({
+    category: 'community',
+    priority: 'low',
+    templateId: 'agora.notification',
+    why: 'The one topic in the square that is a REQUEST to mail somebody rather than a fact about the square. agora already applied the reader\'s own preferences (`email_prefs`, joined INNER so a voice who never opted in is not even considered), already waited out a fifteen-minute window so four replies are one mail, and already checked the notification is still unread at sweep time. Everything left to decide here is which words and how loud.',
+    // `low` because a reply is not an interruption: it is waiting in a place the reader will go
+    // back to anyway, and the square's own badge is the primary channel. The whole point of the
+    // sweep's window is that this can be late.
+    variant: Object.freeze({
+      when: (event: InboundEvent) => str(event.payload, ['kind'], '') === 'moderation',
+      priority: 'normal',
+      templateId: 'agora.moderation',
+      why: 'Every other kind is somebody talking to you; this one is the platform having taken something of yours down or suspended the account, and it is the only kind agora ever fills `detail` in for — the reason a moderator gave. A person whose post vanishes with no explanation concludes the product is broken rather than that they broke a rule, so this is not a louder reply, it is different news with a different template.',
+    }),
+    // NOT `forUser`, and the reason is the ACTOR: agora emits this with `actor: row.subject`, so
+    // `userIdOf`'s last-resort branch would resolve the right person today and quietly resolve the
+    // wrong one the day a sweep runs under a service principal — which is what a scheduled sweep
+    // is. The subject is a payload FIELD here, put there deliberately (`sweepEmail` calls it "the
+    // SUBJECT, not an email address"), and `userOfSubject` rather than a slice because `user:` is
+    // one of four principal spellings and slicing the others produces a well-formed row filed
+    // against nobody.
+    recipients: (event: InboundEvent): RecipientSet => {
+      const reader = userOfSubject(str(event.payload, ['subject'], ''))
+      if (reader.kind === 'none') return reader
+      const notificationId = str(event.payload, ['notification_id', 'notificationId'], event.key)
+      return {
+        kind: 'recipients',
+        recipients: [
+          {
+            userId: reader.userId,
+            params: {
+              headline: agoraHeadline(event),
+              // agora fills this in for `moderation` and for nothing else, so the fallback is
+              // what the `agora.moderation` template renders if a future kind arrives with an
+              // empty one. "No reason was recorded" is true and actionable; a blank is neither.
+              detail: str(event.payload, ['detail'], 'No reason was recorded.'),
+              // Absolute when agora knows its own origin, `/notifications` when it does not — and
+              // `/notifications` is deliberately the HUB's notification centre rather than a
+              // guessed agora hostname. See the `agora.notification` template for the whole
+              // argument, and `Env.publicUrl` in micro-agora for who is allowed to answer it.
+              url: str(event.payload, ['url'], '/notifications'),
+            },
+            // The NOTIFICATION, not the event: the sweep is bounded by a time window rather than
+            // by a `notified_at` column, so a sweep that overlaps its predecessor can offer the
+            // same still-unread notification twice. Keying on the row is what makes that one mail.
+            dedupeKey: `agora.notification:${notificationId}`,
+            subjectUrn: `cf:agora:notification:${notificationId}`,
+          },
+        ],
+      }
+    },
+  }),
+
   /* --------------------------------------------------------- platform */
 
 } satisfies Readonly<Record<string, Rule>>)
+
+/**
+ * What an agora notification is, in the words the square itself uses.
+ *
+ * Copied from `SENTENCE` in `agora-web/src/pages/notifications.tsx`, deliberately and in the same
+ * past tense, because the mail and the row are the SAME notification: a reader who follows the link
+ * must find the sentence they were just sent. Two spellings of one fact read as two facts.
+ *
+ * `Record<string, string>` rather than a union: `kind` is a string off a payload, notify does not
+ * import agora's types, and a kind this table has never seen must degrade to a true sentence rather
+ * than fail. `moderation` is absent on purpose — it is the variant's template and never reaches
+ * this map.
+ */
+const AGORA_SENTENCES: Readonly<Record<string, string>> = Object.freeze({
+  reply: 'replied to you',
+  quote: 'quoted your post',
+  echo: 'echoed your post',
+  spark: 'sparked your post',
+  mention: 'mentioned you',
+  follow: 'followed you',
+  follow_request: 'asked to follow you',
+  follow_accepted: 'accepted your follow',
+  whisper: 'whispered to you',
+  circle_invite: 'invited you to a circle',
+  circle_request: 'asked to join your circle',
+  circle_accepted: 'let you into a circle',
+})
+
+/**
+ * The one sentence an agora mail leads with: who did what.
+ *
+ * The handle is agora's, not identity's, and it arrives already resolved on the payload — this
+ * service holds no voices and must not start. When it is absent the sentence falls back to
+ * "Someone", which is the honest form for the two cases that produce it: an actor whose account
+ * was erased between the notification and the sweep, and any future kind that has no actor at all.
+ */
+function agoraHeadline(event: InboundEvent): string {
+  const kind = str(event.payload, ['kind'], '')
+  const sentence = AGORA_SENTENCES[kind] ?? 'left something for you in the square'
+  const handle = str(event.payload, ['actor_handle', 'actorHandle'], '')
+  return handle ? `@${handle} ${sentence}` : `Someone ${sentence}`
+}
 
 /**
  * Community events name a community, not a user, and this service does not hold memberships.
@@ -2250,6 +2357,42 @@ export const NON_NOTIFYING_TOPICS: Readonly<Record<string, string>> = Object.fre
   // ── mint ───────────────────────────────────────────────────────────────────────────────────
   // The only mint topic that is not a rule. The rest of the deploy path — paid, broadcast,
   // confirmed, failed — is addressed to the buyer, because the buyer is waiting for a token.
+  // ── agora: thirteen of the fourteen, and the same answer thirteen times ────────────────────
+  // The fourteenth — `agora.notification.mail_requested` — is the rule above, and this block is
+  // the other half of that decision rather than thirteen separate deferrals. agora keeps its own
+  // notification table, applies the reader's own email preferences to it, waits out a window so a
+  // burst is one mail, and then asks for exactly the mail it wants. Everything below is a RAW FACT
+  // about the square, published for activity's feed and for anybody building on the bus; deriving
+  // notifications from them here would re-decide, badly and without the reader's preferences, a
+  // question the producer has already answered. That is a stronger form of the argument
+  // `settlement.outbound.confirmed` makes: not "somebody else already tells them", but "somebody
+  // else already decided whether to".
+  'agora.post.created':
+    'A post is the square working, not news. Every one of these would have to be fanned out to a follower list this service does not hold and must not copy, and the reader who wants the fan-out already gets it: agora writes a notification row for the replies, quotes and mentions that name a person, and asks for mail on exactly those through agora.notification.mail_requested. A rule here would mail every follower of every post ever written.',
+  'agora.post.edited':
+    'The author edited it, in the composer, looking at it. Nobody else is a candidate — an edit is not addressed to anyone, and agora writes no notification row for one — so a rule here could only ever tell somebody a thing they just did. aetherholm.city.founded exactly, in a smaller currency. The event exists for the feed and for anybody replaying the square, which is what it is registered for.',
+  'agora.post.deleted':
+    'Same shape as the edit, with one extra reason: the person who deleted a post is the person who no longer wants it discussed, and a mail about it is the platform reopening the subject. The one deletion somebody else needs to hear about is a MODERATOR removing it, and that is a notification row agora writes and a mail agora asks for, with the reason attached — see the agora.moderation variant.',
+  'agora.spark.created':
+    "A like. Mailing an author once per like is the single loudest thing this estate could do to somebody popular, and it is the canonical example of the notification people mute a product over. The author's half is not lost: agora writes the notification row, the square badges it, and the sweep offers mail only if the reader asked for that category and had not already read it.",
+  'agora.echo.created':
+    'A repost, and the same argument as the spark: it is affirmation rather than address, it arrives in bursts, and its whole value is cumulative — a count on the post — rather than per-event. agora holds the row so the count and the list of who echoed are both there when the author looks, which is where somebody actually goes to find out.',
+  'agora.voice.renamed':
+    "Somebody changed their own handle, in their own settings, and is looking at the result. The parties who might care — people who follow them — are a list this service does not hold, and telling them would be a notification about somebody else's cosmetic choice. The feed keeps the record, and the old handle is released rather than aliased, which is the fact that actually matters and is documented in the square.",
+  'agora.voice.suspended':
+    'The suspended person IS told, by name and with the moderator\'s reason, and not from here: agora writes a `moderation` notification row in the same transaction as the suspension, and the sweep asks for that mail through agora.notification.mail_requested, which the variant above renders as agora.moderation. A rule here would be a second mail about one suspension, and the two could not share a dedupe key because they would be keyed by two producers on two different ids. This entry is the wallet.withdrawal.refunded shape, decided the same way.',
+  'agora.follow.created':
+    'The followee is told by agora, which writes a `follow` or `follow_request` notification row and lets the reader decide through `on_follow` whether that is worth an email. A rule here would ignore that preference — this service cannot see it — and would also mail on a PENDING request that the followee may never accept, which is a mail about a thing that did not happen.',
+  'agora.bar.created':
+    'A bar must be silent, and that is the whole design. agora answers a barred voice as if the barrer were not there rather than telling them they were blocked, so a notification would defeat the feature for the person it protects; and the barrer is the one who did it, in the menu, on purpose. Neither party is a recipient. The event exists so moderation and the feed can see the act, not so anybody is told about it.',
+  'agora.circle.created':
+    'The founder opened it, filled the form and is standing in the circle they just made. Nobody else exists yet — a circle has one member at creation — so there is literally no second party to notify. Being invited to one is the fact worth a message, and that is a notification row agora writes and a mail the sweep asks for.',
+  'agora.whisper.sent':
+    'A private message, and this is the one topic in the square whose payload deliberately carries nothing — no text, no recipient, no subject, only a length and a thread id. That is not an omission to be fixed: filing "who messaged whom, and when" would build a social graph out of events designed to carry none. The recipient is still told, by agora, from the message itself, and mails it if `on_whisper` says so.',
+  'agora.report.filed':
+    'A report is addressed to moderators, who are not users with notification preferences, and its subject is a person who must not learn they were reported — that is how a reporter gets retaliated against. The reporter is not told either, deliberately: an acknowledgement that a report was received is the queue talking, and the queue is /moderation. Operators watch this through the moderation surface and the feed, which is what the event is registered for.',
+  'agora.moderation.acted':
+    'The audit trail of a moderator\'s action, keyed by the action and actored by the operator. Its subject hears about the outcome — a removal or a suspension — through the `moderation` notification agora writes, with the reason attached, which the agora.moderation template renders. This event is the operator-side record of the same act: a rule here would either mail the moderator about their own decision or mail the subject a second time about one removal.',
   'mint.deploy.funding_requested':
     "The platform paying its own gas. A paid order gets its own deployer address, and that address starts empty, so mint names the shortfall and settlement's treasury covers it — two of our services, one of our addresses, money that was never the buyer's. It names nobody either: the registry keys it by `token_id` and the payload carries a chain, a network, a deployer address and an amount in wei, with no user on it at all, so a rule here could only ever answer no_recipient. What the buyer is actually waiting for — that the token deployed, or that it did not — reaches them from mint.deploy.confirmed and mint.token.failed, which is the same argument settlement.outbound.confirmed makes about wallet's narrow twin: the funding step is plumbing under a fact somebody else already reports. Should the treasury ever be unable to cover it, that is an operator page and a metric (settlement's deployer top-up counters), not a mail to a customer who can do nothing about it.",
 })

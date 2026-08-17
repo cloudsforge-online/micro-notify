@@ -810,6 +810,62 @@ export const TEMPLATES = Object.freeze({
     ),
   }),
 
+  /* ------------------------------------------------------------------ agora */
+
+  /**
+   * Thirteen kinds of square notification, two templates, and the split is the argument.
+   *
+   * A reply, a mention, a follow, a whisper and an invitation are the SAME news — somebody did
+   * something to you in the square and it is waiting there — so they share one template and the
+   * sentence that distinguishes them arrives as `headline`, already built by the rule from
+   * agora's own words. Thirteen near-identical templates differing by one verb would be thirteen
+   * places to get the tone wrong and one place a new kind is forgotten.
+   *
+   * `path` is the whole `{{url}}`, absolute, and that is the `account.verify_email` precedent
+   * rather than a new one. `NOTIFY_PUBLIC_URL` is the hub, the hub has no route into the square,
+   * and a relative path here would render a mail whose one button 404s. agora is the only party
+   * that knows its own origin — see `Env.publicUrl` there — so agora sends it, and the rule
+   * substitutes `/notifications` when a deployment has not been told, which lands on a page that
+   * exists rather than a hostname somebody guessed.
+   *
+   * The body does not print the post's words. agora deliberately puts none on the payload: a
+   * followers-only post whose text reached a mail server would be readable by anyone holding the
+   * mailbox, which is not the audience the author chose.
+   */
+  'agora.notification': Object.freeze({
+    id: 'agora.notification',
+    category: 'community',
+    params: ['headline', 'url'],
+    path: '{{url}}',
+    text: en(
+      'Forge Agora: {{headline}}',
+      '{{headline}}.\n\nIt is waiting in the square. Reading it there is what stops this reminder — one notification is one mail, and only while it is still unread.\n\nTo stop these altogether, open Forge Agora and turn them off under settings.',
+    ),
+  }),
+
+  /**
+   * The moderation half, and it is different news rather than a louder version of the same news.
+   *
+   * Every other kind is somebody talking to you and can wait; this one is the platform having
+   * taken something of yours down, which is the case where a person concludes the product is
+   * broken unless it says otherwise. It also carries the one `detail` agora ever fills in — the
+   * reason a moderator gave — and a reason a reader cannot see is worse than no message at all.
+   *
+   * Its link is `{{url}}` for the same reasons as above, and in practice that resolves to the
+   * notification list: `agora/src/moderation.ts` notifies with no post id, because the post the
+   * message is about is exactly the one that is no longer there.
+   */
+  'agora.moderation': Object.freeze({
+    id: 'agora.moderation',
+    category: 'community',
+    params: ['detail', 'url'],
+    path: '{{url}}',
+    text: en(
+      'A moderator acted on something of yours in Forge Agora',
+      'Something of yours in Forge Agora was acted on after review.\n\nReason given: {{detail}}\n\nThe guidelines this was measured against are published in the square, at /guidelines.',
+    ),
+  }),
+
   /* ------------------------------------------------------------------ platform */
 
   'system.incident': Object.freeze({
