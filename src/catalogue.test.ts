@@ -1073,6 +1073,25 @@ test('the sentence #221 is about is gone from the service, not just unreferenced
   assert.doesNotMatch(live, /Nothing has left your balance/, 'the false sentence is renderable again')
 })
 
+test('a completed conversion is a written decision not to notify, and is never both', () => {
+  // micro-org#495 §4 registered `wallet.conversion.completed` so the feed could carry it. notify
+  // gets the same event and answers no — and an unanswered topic and a topic somebody decided
+  // against look identical a year later, so the argument is recorded at the length of one.
+  const topic = 'wallet.conversion.completed'
+  assert.equal(isRegisteredTopic(topic), true, 'the topic is not in the registry at all')
+  assert.equal(hasRule(topic), false, `${topic} is recorded as not notifying AND mapped`)
+  const reason = NON_NOTIFYING_TOPICS[topic]
+  assert.ok(reason, `${topic} has no rule and no reason`)
+  assert.ok((reason?.length ?? 0) > 200, `${topic}'s reason is a label, not a decision`)
+  // Still accepted at /ingest. A topic answered "no notification" is not a topic answered
+  // "unknown": the second one quarantines and the relay retries it for ever.
+  assert.equal(isKnownTopic(topic), true, `${topic} must still be accepted at /ingest`)
+
+  // The distinction the reason turns on, asserted rather than only asserted in prose: the deposit
+  // that arrives while nobody is watching DOES notify, and it is the nearest neighbour to this one.
+  assert.equal(hasRule('wallet.deposit.confirmed'), true, 'the contrast this decision rests on is gone')
+})
+
 /* ==================================================================================================
  * market.offer.made — the rule whose whole difficulty is WHICH person.
  *
