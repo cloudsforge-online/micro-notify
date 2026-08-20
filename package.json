@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/notify",
-  "version": "2026.8.90",
+  "version": "2026.8.91",
   "private": true,
   "description": "The platform-wide notification service: event to notification mapping, preferences, templates, dedupe, digests, retries, delivery history, operator broadcasts, and developer webhooks as one pipeline.",
   "license": "MIT",
