@@ -446,6 +446,16 @@ export interface CreateDelivery {
   readonly channel: Channel
   readonly targetId: string | null
   readonly maxAttempts: number
+  /**
+   * Which estate's event asked for this mail, or `null` where nothing said.
+   *
+   * notify is ONE pipeline with ONE quota by design (micro-deploy
+   * `docs/network-consolidation.md`): the thing that differs between the estates is not the
+   * sending, it is which event triggered it, and that is a fact about the delivery. Null is
+   * honest for a caller that has not been taught to say — including the digest path, which runs
+   * off a timer with no request to read.
+   */
+  readonly network?: string | null | undefined
 }
 
 export async function insertDeliveries(
@@ -455,9 +465,9 @@ export async function insertDeliveries(
   let created = 0
   for (const delivery of deliveries) {
     await tx`
-      insert into deliveries (notification_id, user_id, channel, target_id, max_attempts)
+      insert into deliveries (notification_id, user_id, channel, target_id, max_attempts, network)
       values (${delivery.notificationId}, ${delivery.userId}, ${delivery.channel},
-              ${delivery.targetId}, ${delivery.maxAttempts})
+              ${delivery.targetId}, ${delivery.maxAttempts}, ${delivery.network ?? null})
     `
     created += 1
   }
@@ -584,8 +594,11 @@ export async function claimDeliveries(
  */
 export async function resendDelivery(sql: Db, id: string): Promise<string | null> {
   const rows = await sql<Array<{ id: string }>>`
-    insert into deliveries (notification_id, user_id, channel, target_id, max_attempts)
-    select d.notification_id, d.user_id, d.channel, d.target_id, d.max_attempts
+    insert into deliveries (notification_id, user_id, channel, target_id, max_attempts, network)
+    -- The resend carries the ORIGINAL's estate, not the resending operator's. A mail resent from
+    -- the mainnet admin console is still the testnet event's mail; re-stamping it would make the
+    -- dead-letter view disagree with the row it was copied from.
+    select d.notification_id, d.user_id, d.channel, d.target_id, d.max_attempts, d.network
       from deliveries d
      where d.id = ${id}::uuid
        and d.state <> 'pending'
@@ -1167,6 +1180,7 @@ export function deliveriesFor(
   routes: readonly Route[],
   targets: readonly ChannelTarget[],
   maxAttempts: number,
+  network: string | null = null,
 ): CreateDelivery[] {
   const byChannel = new Map<Channel, ChannelTarget[]>()
   for (const target of targets) {
@@ -1179,11 +1193,11 @@ export function deliveriesFor(
     if (route.when !== 'instant') continue
     const forChannel = byChannel.get(route.channel) ?? []
     if (forChannel.length === 0) {
-      out.push({ notificationId, userId, channel: route.channel, targetId: null, maxAttempts })
+      out.push({ notificationId, userId, channel: route.channel, targetId: null, maxAttempts, network })
       continue
     }
     for (const target of forChannel) {
-      out.push({ notificationId, userId, channel: route.channel, targetId: target.id, maxAttempts })
+      out.push({ notificationId, userId, channel: route.channel, targetId: target.id, maxAttempts, network })
     }
   }
   return out

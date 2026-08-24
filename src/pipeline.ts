@@ -133,6 +133,15 @@ export interface NotificationRequest {
   readonly sourceTopic: string | null
   readonly sourceEventId: string | null
   readonly correlationId: string | null
+  /**
+   * The estate whose event asked for this, or `null` where nothing said.
+   *
+   * Recorded on the DELIVERY rather than routed to a second pipeline: notify keeps one SMTP
+   * allowance, one dead-letter view and one place to look when a user says they got nothing. What
+   * differs between the estates is which event fired, and that is a property of the row. See
+   * micro-deploy `docs/network-consolidation.md`.
+   */
+  readonly network?: string | null | undefined
 }
 
 export type CreateOutcome =
@@ -197,6 +206,7 @@ export async function createNotification(
     routing.routes,
     targets,
     deps.maxAttempts,
+    request.network ?? null,
   )
   await insertDeliveries(tx, instant)
 
@@ -423,6 +433,13 @@ export type IngestOutcome =
 export async function ingestEvent(
   deps: PipelineDeps,
   event: InboundEvent,
+  /**
+   * The estate the DELIVERING REQUEST came from, stamped onto every delivery this event creates.
+   *
+   * Optional and defaulting to null, so every existing caller and the digest path — which runs off
+   * a timer and has no request to read — keep today's behaviour and write an honest null.
+   */
+  network: string | null = null,
 ): Promise<IngestOutcome> {
   const outcome = await withInbox(deps.sql, event.topic, event.id, async (tx) => {
     if (ERASURE_TOPICS.has(event.topic)) {
@@ -461,7 +478,11 @@ export async function ingestEvent(
     const created: string[] = []
     const suppressed: SuppressionReason[] = []
     for (const recipient of set.recipients) {
-      const result = await createNotification(tx, deps, requestFor(event, rule.category, outcome.priority, outcome.templateId, recipient))
+      const result = await createNotification(
+        tx,
+        deps,
+        requestFor(event, rule.category, outcome.priority, outcome.templateId, recipient, network),
+      )
       if (result.kind === 'created') created.push(result.notificationId)
       else suppressed.push(result.reason)
     }
@@ -540,6 +561,7 @@ function requestFor(
   priority: Priority,
   templateId: TemplateId,
   recipient: Recipient,
+  network: string | null,
 ): NotificationRequest {
   return {
     userId: recipient.userId,
@@ -555,6 +577,7 @@ function requestFor(
     sourceTopic: event.topic,
     sourceEventId: event.id,
     correlationId: event.correlationId,
+    network,
   }
 }
 

@@ -131,6 +131,14 @@ export interface Env {
    * connection-string variable, so adding a second one here fails the build rather than review.
    */
   readonly databaseUrl: string
+  /**
+   * `CF_NETWORK_SINGLE`: the estate to assume when no `CF-Network` arrives. For `pnpm dev`, which
+   * has no gateway. NEVER set in production.
+   *
+   * NOT a database selector — notify keeps one pipeline, one quota and one dead-letter view. It
+   * decides what goes in `deliveries.network`. See micro-deploy `docs/network-consolidation.md`.
+   */
+  readonly singleNetwork: string
   readonly databasePoolMax: number
   readonly identityJwksUrl: string
   readonly identityIssuer: string
@@ -212,6 +220,7 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     version: optional(source, 'CLOUDSFORGE_TAG', 'dev'),
     logLevel: logLevel as Env['logLevel'],
     databaseUrl: required(source, 'NOTIFY_DATABASE_URL'),
+    singleNetwork: optional(source, 'CF_NETWORK_SINGLE', ''),
     // A pool larger than the database's own connection budget divided by the replica count is a
     // service that exhausts Postgres for everything else the moment it scales.
     databasePoolMax: integer(source, 'NOTIFY_DATABASE_POOL_MAX', 10, 1, 100),
