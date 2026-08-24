@@ -183,6 +183,10 @@ async function harness(principal: Principal | Error = USER): Promise<Harness> {
     },
     store: fakeStore(calls),
     pipeline,
+    // The harness talks to the server directly, with no gateway to stamp `CF-Network`. Same
+    // position as `pnpm dev`, and the same setting covers it — a route that reached this far
+    // without a network would answer 500, which is deliberate everywhere else.
+    singleNetwork: 'mainnet' as const,
     ingestSecrets: [INGEST_SECRET],
     enqueueBroadcast: async (id) => {
       calls.broadcasts.push(id)

@@ -373,6 +373,41 @@ export const MIGRATIONS: readonly Migration[] = [
         check (reason is null or reason in (${sqlValues(FAILURE_REASONS)}));
     `,
   },
+  {
+    version: 10,
+    name: 'delivery-network',
+    up: `
+      -- WHICH ESTATE ASKED FOR THIS MAIL — the network consolidation (micro-deploy
+      -- \`docs/network-consolidation.md\`).
+      --
+      -- notify stays ONE pipeline with ONE quota, deliberately. Two pipelines would mean two
+      -- SMTP allowances against one 150/day account, two dead-letter views to check and two
+      -- places to look when a user says they got nothing — and the thing that actually differs
+      -- between the estates is not the sending, it is which event triggered it. That is a fact
+      -- about the DELIVERY, so it goes in a column rather than in a second deployment.
+      --
+      -- NULLABLE, and not back-filled. Every row written before this migration was sent by a
+      -- single-network pod, so its estate is knowable from the deployment — but knowable is not
+      -- recorded, and stamping 'mainnet' across history would turn an inference into an
+      -- assertion. Null reads as "before the estate was tracked", which is true.
+      --
+      -- Checked rather than free text, for the same reason every other enum here is: an alert
+      -- that groups by this column must not acquire a third series because somebody wrote
+      -- 'Mainnet'.
+      alter table deliveries add column if not exists network text;
+      alter table deliveries drop constraint if exists deliveries_network_check;
+      alter table deliveries
+        add constraint deliveries_network_check
+        check (network is null or network in ('mainnet', 'testnet'));
+
+      -- The access path for "show me this estate's dead letters", which is the query an operator
+      -- runs during an incident. Partial on the terminal states for the same reason
+      -- \`deliveries_deadletter_idx\` is: history is large and the failures are not.
+      create index if not exists deliveries_network_deadletter_idx
+        on deliveries (network, created_at desc)
+        where state in ('undeliverable', 'dead');
+    `,
+  },
 ]
 
 /**

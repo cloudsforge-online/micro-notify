@@ -27,6 +27,7 @@
  * object would compare a MAC over bytes nobody sent.
  */
 
+import { NetworkUnknownError, requestNetwork, type Network } from '@cloudsforge/http'
 import {
   createServer as createHttpServer,
   type IncomingMessage,
@@ -70,6 +71,11 @@ export interface PrincipalVerifier {
 }
 
 export interface ServerDeps {
+  /**
+   * `CF_NETWORK_SINGLE`, for `pnpm dev`, which has no gateway to stamp the header. Never set in
+   * production: the estate that asked for a mail is a fact about the request.
+   */
+  readonly singleNetwork?: Network
   readonly lifecycle: Lifecycle
   readonly logger: Logger
   readonly metrics: Metrics
@@ -122,6 +128,14 @@ interface Reply {
   readonly contentType?: string
 }
 
+/**
+ * Routes that answer without belonging to a network.
+ *
+ * Kubelet probes the first two and Prometheus scrapes the third; none arrives through the gateway,
+ * so none carries `CF-Network`. Refusing them turns a data-isolation rule into a CrashLoopBackOff.
+ */
+const OPERATIONAL_ROUTES: ReadonlySet<string> = new Set(['/livez', '/readyz', '/metrics'])
+
 interface RequestContext {
   readonly req: IncomingMessage
   readonly url: URL
@@ -129,6 +143,16 @@ interface RequestContext {
   readonly log: Logger
   /** Set by the router for a route whose path carries an id. */
   readonly param: string | null
+  /**
+   * The estate whose event this request carries.
+   *
+   * notify is a class B′ singleton (micro-deploy `docs/network-consolidation.md` §5): ONE pipeline,
+   * ONE SMTP allowance, ONE dead-letter view. So this is not a database selector — it is stamped
+   * onto the DELIVERY, because what differs between the estates is which event fired, not how the
+   * mail is sent. Two pipelines would mean two allowances against one 150/day account and two
+   * places to look when somebody says they got nothing.
+   */
+  readonly network: Network
 }
 
 interface Route {
@@ -163,31 +187,53 @@ export function createServer(deps: ServerDeps): Server {
     inFlight += 1
     deps.metrics.set('http_requests_in_flight', inFlight)
 
-    const finish = (status: number) => {
+    const finish = (status: number, metricNetwork: string) => {
       inFlight -= 1
       deps.metrics.set('http_requests_in_flight', inFlight)
       const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6
+      // One target now serves both estates, so the network has to be on the SERIES. Labelled per
+      // target it would say nothing — micro-org#398 in a form nothing could recover.
       deps.metrics.increment('http_requests_total', {
         method: req.method ?? 'GET',
         route: routeLabel,
         status: String(status),
+        network: metricNetwork,
       })
       deps.metrics.observe('http_request_duration_ms', durationMs, {
         method: req.method ?? 'GET',
         route: routeLabel,
+        network: metricNetwork,
       })
     }
 
-    void handle(matched, { req, url, requestId, log, param: matched?.param ?? null }, deps)
+    // `requestNetwork` REFUSES an unstamped request rather than assuming mainnet. notify has one
+    // database, so a wrong answer does not misfile a row into another estate — it mislabels which
+    // estate asked for a mail, which is the one fact this column exists to record.
+    const networkless = matched !== undefined && OPERATIONAL_ROUTES.has(matched.route.path)
+    let network: Network
+    try {
+      network = networkless
+        ? (deps.singleNetwork ?? 'mainnet')
+        : requestNetwork(req.headers, deps.singleNetwork ? { fallback: deps.singleNetwork } : {})
+    } catch (err) {
+      log.error('request carries no usable network', {
+        err: err instanceof NetworkUnknownError ? err.message : err,
+      })
+      send(res, errorReply(500, 'network_unknown', 'this request could not be attributed to a network', requestId), requestId)
+      finish(500, 'unknown')
+      return
+    }
+
+    void handle(matched, { req, url, requestId, log, param: matched?.param ?? null, network }, deps)
       .then((reply) => {
         send(res, reply, requestId)
-        finish(reply.status)
+        finish(reply.status, network)
       })
       .catch((err: unknown) => {
         // Reaching here means the error mapping itself failed. Answer, then say so loudly.
         log.error('request handler threw after mapping', { err })
         send(res, errorReply(500, 'internal', 'the request could not be completed', requestId), requestId)
-        finish(500)
+        finish(500, network)
       })
   })
 }
@@ -475,7 +521,8 @@ function buildRoutes(): Route[] {
 
         const done = deps.lifecycle.track()
         try {
-          const outcome = await ingestEvent(deps.pipeline, read.event)
+          // The estate travels with the event, onto every delivery it creates.
+          const outcome = await ingestEvent(deps.pipeline, read.event, ctx.network)
           deps.metrics.increment(INGESTED_TOTAL, { outcome: outcome.kind })
           // Pull the dispatcher forward so a critical notification is not waiting on a poll.
           if (outcome.kind === 'processed' && outcome.created.length > 0) {

@@ -151,6 +151,7 @@ const server = createServer({
   verifier,
   store: postgresNotifyStore(sql),
   pipeline,
+  ...(env.singleNetwork ? { singleNetwork: env.singleNetwork as 'mainnet' | 'testnet' } : {}),
   ingestSecrets: env.ingestSigningSecrets,
   enqueueBroadcast: async (broadcastId) => {
     await queue.enqueue({
